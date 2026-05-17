@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Environment — never commit secrets
+.env
+
+# macOS
+.DS_Store
+
+# Claude workspace
+.claude/

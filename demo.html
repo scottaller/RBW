@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Revive Bodywork — Booking Widget Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #F6F6F6; color: #3E3E3E; min-height: 100vh;
+    }
+
+    /* Nav */
+    nav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 40px; background: #fff; border-bottom: 1px solid #E7E7E7;
+      position: sticky; top: 0; z-index: 100;
+    }
+    .nav-brand { font-size: 14px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #412F83; }
+    .nav-links { display: flex; gap: 30px; list-style: none; }
+    .nav-links a { text-decoration: none; color: #3E3E3E; font-size: 14px; font-weight: 400; opacity: 0.75; transition: opacity .15s; }
+    .nav-links a:hover { opacity: 1; }
+    .nav-cta {
+      background: #F39C44; color: #fff; border: none; border-radius: 25px;
+      padding: 10px 24px; font-size: 14px; font-weight: 600; cursor: pointer;
+      font-family: inherit; transition: background .15s;
+    }
+    .nav-cta:hover { background: #E68C3A; }
+
+    /* Hero */
+    .hero { display: grid; grid-template-columns: 1fr 1fr; min-height: 500px; overflow: hidden; }
+    .hero-content { display: flex; flex-direction: column; justify-content: center; padding: 80px 60px; background: #fff; }
+    .hero-tag {
+      display: inline-block; background: #FEF3E4; color: #E68C3A;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+      padding: 5px 14px; border-radius: 20px; margin-bottom: 20px; width: fit-content;
+    }
+    .hero h1 { font-size: 44px; font-weight: 700; line-height: 1.15; margin-bottom: 18px; color: #272727; }
+    .hero h1 em { color: #412F83; font-style: normal; }
+    .hero p { font-size: 16px; line-height: 1.7; color: #999; max-width: 380px; margin-bottom: 32px; font-weight: 300; }
+    .hero-btns { display: flex; gap: 12px; flex-wrap: wrap; }
+    .btn-primary {
+      background: #F39C44; color: #fff; border: none; border-radius: 25px;
+      padding: 13px 28px; font-size: 15px; font-weight: 600; cursor: pointer;
+      font-family: inherit; transition: all .18s;
+    }
+    .btn-primary:hover { background: #E68C3A; transform: translateY(-1px); }
+    .hero-image {
+      background: linear-gradient(135deg, #412F83 0%, #1e1540 100%);
+      position: relative; overflow: hidden;
+    }
+    .hero-img-bg {
+      position: absolute; inset: 0;
+      background: url('https://images.unsplash.com/photo-1544161515-4ab6ce6db874?w=800&q=80') center/cover;
+      opacity: 0.45; mix-blend-mode: luminosity;
+    }
+    .hero-badge {
+      position: absolute; bottom: 28px; left: 28px;
+      background: rgba(255,255,255,0.95); border-radius: 10px;
+      padding: 14px 18px; font-size: 13px;
+    }
+    .hero-badge strong { display: block; font-weight: 600; font-size: 15px; color: #272727; margin-bottom: 3px; }
+    .hero-badge span { color: #999; font-weight: 300; }
+
+    /* Services */
+    .section { padding: 72px 60px; }
+    .section-tag { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #F39C44; margin-bottom: 12px; }
+    .section h2 { font-size: 32px; font-weight: 700; margin-bottom: 14px; color: #272727; }
+    .section p.lead { font-size: 16px; color: #999; line-height: 1.7; max-width: 500px; margin-bottom: 44px; font-weight: 300; }
+    .services-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 18px; }
+    .service-card {
+      background: #fff; border: 1px solid #E7E7E7; border-radius: 8px;
+      padding: 26px 22px; transition: all .2s;
+    }
+    .service-card:hover { transform: translateY(-3px); box-shadow: 0 8px 30px rgba(0,0,0,0.06); }
+    .svc-icon {
+      width: 46px; height: 46px; background: #EEE9F8; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px; margin-bottom: 14px;
+    }
+    .service-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; color: #272727; }
+    .service-card p { font-size: 14px; color: #999; line-height: 1.65; margin-bottom: 16px; font-weight: 300; }
+    .svc-book {
+      color: #F39C44; font-size: 14px; font-weight: 600;
+      cursor: pointer; background: none; border: none; font-family: inherit; padding: 0;
+    }
+    .svc-book:hover { color: #E68C3A; text-decoration: underline; }
+
+    /* Footer */
+    footer {
+      background: #272727; color: #999;
+      text-align: center; padding: 28px 40px; font-size: 14px; font-weight: 300;
+    }
+    footer strong { color: #F39C44; font-weight: 600; }
+
+    /* Demo notice */
+    .demo-bar {
+      background: #FEF3E4; border-bottom: 2px solid rgba(243,156,68,0.3);
+      padding: 10px 40px; font-size: 13px; color: #9A5A10;
+      display: flex; align-items: center; gap: 8px; font-weight: 400;
+    }
+    .demo-bar strong { font-weight: 600; }
+  </style>
+</head>
+<body>
+
+<div class="demo-bar">
+  🧪 <span><strong>Widget demo</strong> — Click any "Book" button to see the panel. Therapist list loads live from the Momence API.</span>
+</div>
+
+<!-- Nav -->
+<nav>
+  <div class="nav-brand">Revive Bodywork</div>
+  <ul class="nav-links">
+    <li><a href="#">Services</a></li>
+    <li><a href="#">About</a></li>
+    <li><a href="#">Pricing</a></li>
+    <li><a href="#">Contact</a></li>
+  </ul>
+  <button class="nav-cta" data-rbw-book>Book Now</button>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-content">
+    <span class="hero-tag">Denver's Premier Holistic Self-Care</span>
+    <h1>Restore your<br><em>body & mind</em></h1>
+    <p>Expert massage therapy tailored to you. Book your session in seconds — no calls, no wait.</p>
+    <div class="hero-btns">
+      <button class="btn-primary" data-rbw-book>Book a Massage</button>
+    </div>
+  </div>
+  <div class="hero-image">
+    <div class="hero-img-bg"></div>
+    <div class="hero-badge">
+      <strong>Open 7 days a week</strong>
+      <span>9 AM – 7 PM · (720) 794-9640</span>
+    </div>
+  </div>
+</section>
+
+<!-- Services -->
+<section class="section">
+  <div class="section-tag">What we offer</div>
+  <h2>Our Massage Services</h2>
+  <p class="lead">Every session is tailored to your body and goals — from deep therapeutic work to pure relaxation.</p>
+  <div class="services-grid">
+    <div class="service-card">
+      <div class="svc-icon">🫴</div>
+      <h3>Signature Massage</h3>
+      <p>A full-body relaxation massage personalized to your pressure preference and focus areas.</p>
+      <button class="svc-book" data-rbw-book>Book now →</button>
+    </div>
+    <div class="service-card">
+      <div class="svc-icon">💪</div>
+      <h3>Deep Tissue</h3>
+      <p>Targets chronic tension and muscle knots with focused, therapeutic pressure.</p>
+      <button class="svc-book" data-rbw-book>Book now →</button>
+    </div>
+    <div class="service-card">
+      <div class="svc-icon">🦶</div>
+      <h3>Ashiatsu</h3>
+      <p>Bar-supported barefoot massage delivering the broadest, deepest pressure possible.</p>
+      <button class="svc-book" data-rbw-book>Book now →</button>
+    </div>
+    <div class="service-card">
+      <div class="svc-icon">🤰</div>
+      <h3>Prenatal Massage</h3>
+      <p>Safe, nurturing massage designed specifically to support pregnancy comfort and wellness.</p>
+      <button class="svc-book" data-rbw-book>Book now →</button>
+    </div>
+    <div class="service-card">
+      <div class="svc-icon">🔥</div>
+      <h3>Hot Stone</h3>
+      <p>Smooth heated stones melt away tension for a deeply relaxing full-body experience.</p>
+      <button class="svc-book" data-rbw-book>Book now →</button>
+    </div>
+    <div class="service-card">
+      <div class="svc-icon">💑</div>
+      <h3>Couples Massage</h3>
+      <p>A side-by-side massage experience — perfect for partners, friends, or gifting.</p>
+      <button class="svc-book" data-rbw-book>Book now →</button>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <strong>Revive Bodywork</strong> · Denver's Premier Holistic Self-Care Center · (720) 794-9640
+</footer>
+
+<!--
+  Widget embed snippet:
+  - data-host-id and data-token: your Momence credentials (read-only, safe client-side)
+  - data-api-url: your deployed backend for auth + checkout
+  - data-rbw-floating="true": adds the persistent floating button
+-->
+<script
+  src="widget.js"
+  data-host-id="37574"
+  data-token="35055b6efa"
+  data-api-url="http://localhost:3001/api"
+  data-rbw-floating="true"
+></script>
+
+</body>
+</html>
