@@ -313,15 +313,7 @@
     }
     .rbw-first-avail-time { font-size: 28px; font-weight: 700; line-height: 1; margin-bottom: 4px; }
     .rbw-first-avail-date { font-size: 13px; opacity: 0.8; margin-bottom: 12px; }
-    .rbw-first-avail-therapist { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-    .rbw-first-avail-avatar {
-      width: 36px; height: 36px; border-radius: 50%;
-      background: rgba(255,255,255,.2); display: flex; align-items: center;
-      justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0; overflow: hidden;
-    }
-    .rbw-first-avail-avatar img { width: 100%; height: 100%; object-fit: cover; }
-    .rbw-first-avail-tx-name { font-size: 14px; font-weight: 600; }
-    .rbw-first-avail-tx-spec { font-size: 12px; opacity: 0.75; }
+    .rbw-first-avail-therapist { font-size: 13px; opacity: 0.85; margin-bottom: 12px; font-weight: 500; }
     .rbw-first-avail-btn {
       background: var(--rbw-primary); color: #fff; border: none; border-radius: 8px;
       padding: 11px 18px; font-family: var(--rbw-font); font-size: 14px; font-weight: 700;
@@ -872,7 +864,7 @@
   // ─── Step 2: Add-ons ─────────────────────────────────────────────────────
   function renderAddons() {
     const addons = state.service?.addons || [];
-    if (!addons.length) { goTo(S.THERAPIST); return; }
+    if (!addons.length) { goTo(S.CALENDAR); return; }
 
     const body = document.getElementById('rbw-body');
     body.innerHTML = `
@@ -1028,7 +1020,7 @@
     const sb = buildSummaryBar();
     if (sb) body.appendChild(sb);
 
-    // Therapist dropdown
+    // Therapist dropdown — filtered to staff who can perform the selected service AND all add-ons
     const txLbl = document.createElement('div');
     txLbl.className = 'rbw-lbl';
     txLbl.textContent = 'Therapist';
@@ -1044,22 +1036,55 @@
     txSelect.appendChild(anyOpt);
     body.appendChild(txSelect);
 
-    authGet(`/boards/${state.board.id}/staff?serviceId=${state.service.appointmentServiceId}`)
-      .then(staff => {
+    // Build filtered staff list: intersect base service staff with each add-on's staff
+    const baseServiceId = state.service.appointmentServiceId;
+    const addonServiceIds = (state.selectedAddons || []).map(a => a.id).filter(Boolean);
+
+    const staffRequests = [
+      authGet(`/boards/${state.board.id}/staff?serviceId=${baseServiceId}`),
+      ...addonServiceIds.map(id => authGet(`/boards/${state.board.id}/staff?serviceId=${id}`))
+    ];
+
+    Promise.all(staffRequests)
+      .then(results => {
+        // Intersect: only keep therapists who appear in every result set
+        const [baseStaff, ...addonStaffs] = results;
+        const validIds = addonStaffs.reduce((ids, addonStaff) => {
+          const addonIds = new Set(addonStaff.map(m => m.teacherId));
+          return ids.filter(id => addonIds.has(id));
+        }, baseStaff.map(m => m.teacherId));
+
+        const filteredStaff = baseStaff.filter(m => validIds.includes(m.teacherId));
+        state._staffCache = filteredStaff;
+
         txSelect.disabled = false;
-        staff.forEach(member => {
+        filteredStaff.forEach(member => {
           const opt = document.createElement('option');
           opt.value = String(member.teacherId);
           opt.textContent = member.name;
           txSelect.appendChild(opt);
         });
-        txSelect.value = state.staffId ? String(state.staffId) : '';
+
+        // If only one therapist can do this service, auto-select them
+        if (filteredStaff.length === 1) {
+          txSelect.value = String(filteredStaff[0].teacherId);
+          state.staffId   = filteredStaff[0].teacherId;
+          state.staffName = filteredStaff[0].name;
+        } else {
+          txSelect.value = state.staffId ? String(state.staffId) : '';
+        }
+
+        findFirstAvailable();
       })
-      .catch(() => { txSelect.disabled = false; });
+      .catch(() => {
+        txSelect.disabled = false;
+        state._staffCache = [];
+        findFirstAvailable();
+      });
 
     txSelect.onchange = () => {
       const val = txSelect.value;
-      state.staffId   = val || null;
+      state.staffId   = val ? Number(val) : null;
       state.staffName = val ? txSelect.options[txSelect.selectedIndex].text : null;
       state.selectedSlot = null;
       loadAvailability(state.selectedDate);
@@ -1085,7 +1110,62 @@
     body.appendChild(footer);
 
     calMount.appendChild(buildCalendar());
-    loadAvailability(state.selectedDate);
+    // Availability loads after staff resolves (inside the Promise.all above)
+  }
+
+  // Scans forward up to 14 days to find the first date with open slots, then loads it.
+  async function findFirstAvailable() {
+    const section = document.getElementById('rbw-avail-section');
+    if (!section) return;
+    section.innerHTML = `<div class="rbw-spin-wrap"><div class="rbw-spinner"></div><span>Finding first available…</span></div>`;
+
+    const boardId   = state.board?.id;
+    const serviceId = state.service?.appointmentServiceId;
+    if (!boardId || !serviceId) {
+      section.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;">Missing service info. Please go back.</p>`;
+      return;
+    }
+
+    const p2 = n => String(n).padStart(2, '0');
+    const fmtD = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+
+    const start = new Date(state.selectedDate); start.setHours(0, 0, 0, 0);
+    const end   = new Date(start); end.setDate(end.getDate() + 14);
+
+    let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${fmtD(start)}&to=${fmtD(end)}`;
+    if (state.staffId) qs += `&staffId=${state.staffId}`;
+
+    try {
+      const data = await authGet(qs);
+      const raw  = Array.isArray(data) ? data.flat() : [];
+      const open = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+
+      if (!open.length) {
+        // Nothing in the next 14 days — show message
+        section.innerHTML = '';
+        const noAvail = document.createElement('div');
+        noAvail.className = 'rbw-no-avail';
+        const p = document.createElement('p');
+        p.textContent = 'No availability in the next two weeks. Please check back soon.';
+        noAvail.appendChild(p);
+        section.appendChild(noAvail);
+        updateCalCta();
+        return;
+      }
+
+      // Jump to the date of the first open slot
+      const firstSlotDate = new Date(open[0].value);
+      firstSlotDate.setHours(0, 0, 0, 0);
+      state.selectedDate = firstSlotDate;
+      rebuildCalendarSelection();
+
+      // Filter all open slots to just that day and render
+      const dayStr = fmtD(firstSlotDate);
+      const daySlots = open.filter(s => s.value.startsWith(dayStr));
+      renderAvailability(daySlots, section);
+    } catch {
+      section.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;">Couldn't load availability. Please try again.</p>`;
+    }
   }
 
   async function loadAvailability(date) {
@@ -1110,66 +1190,84 @@
     if (state.staffId) qs += `&staffId=${state.staffId}`;
 
     try {
-      // API returns array of day-arrays; flatten and filter to open slots only
       const data  = await authGet(qs);
       const raw   = Array.isArray(data) ? data.flat() : [];
       const slots = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
-
-      // Convert UTC ISO times to local display
-      const localSlots = slots.map(s => {
-        const d    = new Date(s.value);
-        const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-        return { isoValue: s.value, time, minuteOffset: d.getHours() * 60 + d.getMinutes() };
-      });
-
-      section.innerHTML = '';
-
-      if (!localSlots.length) {
-        const noAvail = document.createElement('div');
-        noAvail.className = 'rbw-no-avail';
-        const p = document.createElement('p');
-        p.textContent = 'No availability on this date.';
-        const btn = document.createElement('button');
-        btn.className = 'rbw-btn rbw-btn-outline btn-sm';
-        btn.textContent = 'Find Next Available →';
-        btn.onclick = () => {
-          const next = new Date(state.selectedDate);
-          next.setDate(next.getDate() + 1);
-          state.selectedDate = next;
-          state.selectedSlot = null;
-          rebuildCalendarSelection();
-          loadAvailability(next);
-        };
-        noAvail.appendChild(p);
-        noAvail.appendChild(btn);
-        section.appendChild(noAvail);
-        updateCalCta();
-        return;
-      }
-
-      section.appendChild(renderFirstAvail(localSlots[0]));
-
-      const orDiv = document.createElement('div');
-      orDiv.className = 'rbw-or';
-      orDiv.textContent = 'or choose a different time';
-      section.appendChild(orDiv);
-
-      const pickerMount = document.createElement('div');
-      section.appendChild(pickerMount);
-      renderTimePicker(localSlots, pickerMount);
-      updateCalCta();
+      renderAvailability(slots, section);
     } catch {
       section.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;">Couldn't load availability. Please try again.</p>`;
     }
   }
 
+  // Shared renderer: takes raw API slot objects, converts to local time, and paints the section.
+  function renderAvailability(slots, section) {
+    const localSlots = slots.map(s => {
+      const d    = new Date(s.value);
+      const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+      // Resolve therapist name from cache or selected state
+      const therapistName = resolveTherapistName(s.teacherId);
+      return { isoValue: s.value, time, minuteOffset: d.getHours() * 60 + d.getMinutes(), teacherId: s.teacherId, therapistName };
+    });
+
+    section.innerHTML = '';
+
+    if (!localSlots.length) {
+      const noAvail = document.createElement('div');
+      noAvail.className = 'rbw-no-avail';
+      const p = document.createElement('p');
+      p.textContent = 'No availability on this date.';
+      const btn = document.createElement('button');
+      btn.className = 'rbw-btn rbw-btn-outline btn-sm';
+      btn.textContent = 'Find Next Available →';
+      btn.onclick = () => {
+        const next = new Date(state.selectedDate);
+        next.setDate(next.getDate() + 1);
+        state.selectedDate = next;
+        state.selectedSlot = null;
+        rebuildCalendarSelection();
+        findFirstAvailable();
+      };
+      noAvail.appendChild(p);
+      noAvail.appendChild(btn);
+      section.appendChild(noAvail);
+      updateCalCta();
+      return;
+    }
+
+    section.appendChild(renderFirstAvail(localSlots[0]));
+
+    const orDiv = document.createElement('div');
+    orDiv.className = 'rbw-or';
+    orDiv.textContent = 'or choose a different time';
+    section.appendChild(orDiv);
+
+    const pickerMount = document.createElement('div');
+    section.appendChild(pickerMount);
+    renderTimePicker(localSlots, pickerMount);
+    updateCalCta();
+  }
+
+  function resolveTherapistName(teacherId) {
+    if (!teacherId) return null;
+    // Prefer the filtered staff cache built in renderCalendar
+    const cached = (state._staffCache || []).find(m => m.teacherId === teacherId);
+    if (cached) return cached.name;
+    // Fall back to explicitly selected therapist
+    if (state.staffId && state.staffId === teacherId) return state.staffName;
+    return null;
+  }
+
   function renderFirstAvail(slot) {
     const card = document.createElement('div');
     card.className = 'rbw-first-avail';
+    const therapistLine = slot.therapistName
+      ? `<div class="rbw-first-avail-therapist">with ${slot.therapistName}</div>`
+      : '';
     card.innerHTML = `
       <div class="rbw-first-avail-label">⚡ First Availability</div>
       <div class="rbw-first-avail-time">${slot.time}</div>
       <div class="rbw-first-avail-date">${fmtDate(state.selectedDate)}</div>
+      ${therapistLine}
       <button class="rbw-first-avail-btn" id="rbw-book-first">Book This Time →</button>
     `;
     card.querySelector('#rbw-book-first').onclick = () => {
