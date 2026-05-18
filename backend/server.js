@@ -27,9 +27,12 @@ const MOMENCE_SECRET = process.env.MOMENCE_CLIENT_SECRET;
 const MOMENCE_V1       = 'https://api.momence.com/api/v1';
 const MOMENCE_V2       = 'https://api.momence.com';
 const MOMENCE_READONLY = 'https://momence.com/_api/readonly';
-const WIDGET_ORIGIN  = process.env.WIDGET_ORIGIN || '*';
+// Support comma-separated list of allowed origins, e.g. "https://rbwdenver.com,https://scottaller.github.io"
+const WIDGET_ORIGINS = (process.env.WIDGET_ORIGIN || '*')
+  .split(',').map(o => o.trim()).filter(Boolean);
+const CORS_ORIGIN = WIDGET_ORIGINS.length === 1 ? WIDGET_ORIGINS[0] : WIDGET_ORIGINS;
 
-app.use(cors({ origin: WIDGET_ORIGIN, credentials: true }));
+app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
 app.use(express.json());
 
 // Serve the widget root as static files so demo.html works at localhost:3001
