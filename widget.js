@@ -244,13 +244,26 @@
     /* Type grid */
     .rbw-type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 22px; }
     .rbw-type-card {
-      border: 2px solid var(--rbw-border); border-radius: 10px;
-      padding: 13px 12px; cursor: pointer; transition: all 0.18s; background: var(--rbw-panel);
+      border: 2px solid var(--rbw-border); border-radius: 12px;
+      padding: 14px 13px 16px; cursor: pointer; transition: all 0.18s; background: var(--rbw-panel);
+      display: flex; flex-direction: column; position: relative;
     }
-    .rbw-type-card:hover { border-color: var(--rbw-purple); }
+    .rbw-type-card:hover { border-color: var(--rbw-purple); transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.07); }
     .rbw-type-card.on { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
-    .rbw-type-name { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
-    .rbw-type-desc { font-size: 12px; color: var(--rbw-muted); }
+    .rbw-type-icon {
+      width: 38px; height: 38px; border-radius: 9px; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 19px; margin-bottom: 10px; flex-shrink: 0;
+    }
+    .rbw-type-card.on .rbw-type-icon { background: rgba(65,47,131,0.15); }
+    .rbw-type-name { font-size: 13px; font-weight: 700; margin-bottom: 3px; line-height: 1.3; color: var(--rbw-text); }
+    .rbw-type-desc { font-size: 11.5px; color: var(--rbw-muted); line-height: 1.45; flex: 1; }
+    .rbw-type-badge {
+      position: absolute; top: 10px; right: 10px;
+      background: var(--rbw-primary); color: #fff;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      padding: 2px 7px; border-radius: 20px;
+    }
 
     /* Calendar */
     .rbw-cal { background: var(--rbw-panel); border: 1px solid var(--rbw-border); border-radius: var(--rbw-radius); overflow: hidden; margin-bottom: 20px; }
@@ -756,6 +769,34 @@
     if (state.duration || isAcu) loadServices();
   }
 
+  // Keyword → emoji icon mapping for service tiles
+  const SERVICE_ICONS = [
+    { keys: ['signature', 'deep tissue', 'swedish', 'relaxation'], icon: '🫴' },
+    { keys: ['ashiatsu', 'barefoot'],                              icon: '🦶' },
+    { keys: ['couples', 'partner', 'duo'],                         icon: '💑' },
+    { keys: ['intro', 'first time', 'new client'],                 icon: '🌟' },
+    { keys: ['lymphatic', 'drainage'],                             icon: '💧' },
+    { keys: ['prenatal', 'pregnancy', 'maternity'],                icon: '🤰' },
+    { keys: ['hot stone', 'stone'],                                icon: '🔥' },
+    { keys: ['sport', 'athletic', 'recovery'],                     icon: '💪' },
+    { keys: ['acupuncture', 'needle'],                             icon: '🪡' },
+    { keys: ['visceral', 'manipulation', 'cranio'],                icon: '🫁' },
+    { keys: ['cupping'],                                           icon: '🫙' },
+  ];
+
+  // Fallback short descriptions for boards that don't return one from the API
+  const SERVICE_DESCS = [
+    { keys: ['signature', 'deep tissue'],   desc: 'Targeted pressure for deep tension relief.' },
+    { keys: ['ashiatsu', 'barefoot'],        desc: 'Deepest pressure possible via bar-supported barefoot technique.' },
+    { keys: ['couples'],                     desc: 'Side-by-side session — perfect for partners or friends.' },
+    { keys: ['intro', 'first time'],         desc: 'First visit? Start here for the best intro price.' },
+    { keys: ['prenatal', 'pregnancy'],       desc: 'Safe, nurturing support for pregnancy comfort.' },
+    { keys: ['hot stone'],                   desc: 'Heated stones melt away tension for whole-body relaxation.' },
+    { keys: ['lymphatic'],                   desc: 'Stimulates lymph flow and supports your body\'s detox system.' },
+    { keys: ['sport', 'athletic'],           desc: 'Designed for active bodies — faster recovery, less soreness.' },
+    { keys: ['acupuncture'],                 desc: 'Fine needles restore balance and relieve pain naturally.' },
+  ];
+
   async function loadServices() {
     const section = document.getElementById('rbw-svc-section');
     if (!section) return;
@@ -802,13 +843,23 @@
         return;
       }
 
-      matchingBoards.forEach(({ board, svc }) => {
+      matchingBoards.forEach(({ board, svc }, idx) => {
         const isOn = state.board?.id === board.id;
         const card = document.createElement('div');
         card.className = 'rbw-type-card' + (isOn ? ' on' : '');
-        // Board names are clean — no duration prefix to strip
-        const desc = svc.description || '';
+
+        // Icon + fallback description lookup by keywords in board name
+        const nameLow = board.name.toLowerCase();
+        const icon = SERVICE_ICONS.find(r => r.keys.some(k => nameLow.includes(k)))?.icon || '✨';
+        const fallbackDesc = SERVICE_DESCS.find(r => r.keys.some(k => nameLow.includes(k)))?.desc || '';
+        const desc = svc.description || fallbackDesc;
+
+        // Mark the first massage board (or first acu board) as Popular
+        const isPopular = idx === 0;
+
         card.innerHTML = `
+          ${isPopular ? '<div class="rbw-type-badge">Popular</div>' : ''}
+          <div class="rbw-type-icon">${icon}</div>
           <div class="rbw-type-name">${board.name}</div>
           ${desc ? `<div class="rbw-type-desc">${desc}</div>` : ''}
         `;
