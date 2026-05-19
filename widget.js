@@ -241,23 +241,40 @@
     .rbw-dur-time  { font-size: 17px; font-weight: 700; }
     .rbw-dur-price { font-size: 13px; opacity: 0.8; margin-top: 2px; }
 
+    /* Intro Offers featured button */
+    .rbw-intro-btn {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--rbw-purple); color: #fff; border: none; border-radius: 12px;
+      padding: 15px 18px; cursor: pointer; width: 100%; margin-bottom: 14px;
+      font-family: inherit; transition: all .18s; text-align: left;
+    }
+    .rbw-intro-btn:hover { background: #352470; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(65,47,131,0.3); }
+    .rbw-intro-btn-left { display: flex; flex-direction: column; gap: 2px; }
+    .rbw-intro-btn-label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.75; }
+    .rbw-intro-btn-title { font-size: 16px; font-weight: 700; }
+    .rbw-intro-btn-arrow { font-size: 20px; opacity: 0.6; }
+
     /* Type grid */
     .rbw-type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 22px; }
     .rbw-type-card {
       border: 2px solid var(--rbw-border); border-radius: 12px;
       padding: 14px 13px 16px; cursor: pointer; transition: all 0.18s; background: var(--rbw-panel);
-      display: flex; flex-direction: column; position: relative;
+      display: flex; flex-direction: column; position: relative; min-height: 148px;
     }
     .rbw-type-card:hover { border-color: var(--rbw-purple); transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.07); }
     .rbw-type-card.on { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
     .rbw-type-icon {
-      width: 38px; height: 38px; border-radius: 9px; background: var(--rbw-purple-lt);
+      width: 36px; height: 36px; border-radius: 9px; background: var(--rbw-purple-lt);
       display: flex; align-items: center; justify-content: center;
-      font-size: 19px; margin-bottom: 10px; flex-shrink: 0;
+      margin-bottom: 10px; flex-shrink: 0; color: var(--rbw-purple);
     }
+    .rbw-type-icon svg { width: 18px; height: 18px; }
     .rbw-type-card.on .rbw-type-icon { background: rgba(65,47,131,0.15); }
-    .rbw-type-name { font-size: 13px; font-weight: 700; margin-bottom: 3px; line-height: 1.3; color: var(--rbw-text); }
-    .rbw-type-desc { font-size: 11.5px; color: var(--rbw-muted); line-height: 1.45; flex: 1; }
+    .rbw-type-name { font-size: 13px; font-weight: 700; margin-bottom: 4px; line-height: 1.3; color: var(--rbw-text); }
+    .rbw-type-desc {
+      font-size: 11.5px; color: var(--rbw-muted); line-height: 1.45;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    }
     .rbw-type-badge {
       position: absolute; top: 10px; right: 10px;
       background: var(--rbw-primary); color: #fff;
@@ -718,6 +735,35 @@
     body.appendChild(sub);
 
     if (!isAcu) {
+      // Featured Intro Offers shortcut — bypasses duration picker
+      const introBtn = document.createElement('button');
+      introBtn.className = 'rbw-intro-btn';
+      introBtn.innerHTML = `
+        <div class="rbw-intro-btn-left">
+          <div class="rbw-intro-btn-label">First visit?</div>
+          <div class="rbw-intro-btn-title">Intro Offers &mdash; 20% Off</div>
+        </div>
+        <div class="rbw-intro-btn-arrow">→</div>
+      `;
+      introBtn.onclick = async () => {
+        introBtn.disabled = true;
+        introBtn.style.opacity = '0.7';
+        try {
+          if (!state._boardsCache) state._boardsCache = await authGet('/boards');
+          const introBoard = state._boardsCache.find(b => b.name.toLowerCase().includes('intro'));
+          if (introBoard && introBoard.services[0]) {
+            const svc = introBoard.services[0];
+            state.board          = { id: introBoard.id, name: introBoard.name };
+            state.service        = svc;
+            state.duration       = svc.minDurationInMinutes;
+            state.selectedAddons = [];
+            state._staffCache    = null;
+            goTo(S.ADDONS);
+          }
+        } catch { introBtn.disabled = false; introBtn.style.opacity = '1'; }
+      };
+      body.appendChild(introBtn);
+
       const durLbl = document.createElement('div');
       durLbl.className = 'rbw-lbl';
       durLbl.textContent = 'Session Length';
@@ -769,19 +815,54 @@
     if (state.duration || isAcu) loadServices();
   }
 
-  // Keyword → emoji icon mapping for service tiles
+  // Keyword → SVG icon mapping for service tiles (stroke-based, currentColor = brand purple)
+  const SVG = (path, extra = '') =>
+    `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" ${extra}>${path}</svg>`;
+
   const SERVICE_ICONS = [
-    { keys: ['signature', 'deep tissue', 'swedish', 'relaxation'], icon: '🫴' },
-    { keys: ['ashiatsu', 'barefoot'],                              icon: '🦶' },
-    { keys: ['couples', 'partner', 'duo'],                         icon: '💑' },
-    { keys: ['intro', 'first time', 'new client'],                 icon: '🌟' },
-    { keys: ['lymphatic', 'drainage'],                             icon: '💧' },
-    { keys: ['prenatal', 'pregnancy', 'maternity'],                icon: '🤰' },
-    { keys: ['hot stone', 'stone'],                                icon: '🔥' },
-    { keys: ['sport', 'athletic', 'recovery'],                     icon: '💪' },
-    { keys: ['acupuncture', 'needle'],                             icon: '🪡' },
-    { keys: ['visceral', 'manipulation', 'cranio'],                icon: '🫁' },
-    { keys: ['cupping'],                                           icon: '🫙' },
+    // Three flowing wavy lines — massage strokes
+    { keys: ['signature', 'deep tissue', 'swedish', 'relaxation'],
+      icon: SVG('<path d="M2 6Q6 3 10 6Q14 9 18 6"/><path d="M2 11Q6 8 10 11Q14 14 18 11"/><path d="M2 16Q6 13 10 16Q14 19 18 16"/>') },
+
+    // Footprint — heel ellipse + three toe dots
+    { keys: ['ashiatsu', 'barefoot'],
+      icon: SVG('<ellipse cx="10" cy="14.5" rx="4.5" ry="3.5"/><circle cx="7.5" cy="9.5" r="1" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="12.5" cy="9.5" r="1" fill="currentColor" stroke="none"/>') },
+
+    // Two overlapping rings — partnership
+    { keys: ['couples', 'partner', 'duo'],
+      icon: SVG('<circle cx="7.5" cy="10" r="4"/><circle cx="12.5" cy="10" r="4"/>') },
+
+    // Four-petal lotus — new beginnings / first visit
+    { keys: ['intro', 'first time', 'new client'],
+      icon: SVG('<path d="M10 16C10 16 5 13 5 8.5C5 6 7 4.5 10 7C13 4.5 15 6 15 8.5C15 13 10 16 10 16Z"/><path d="M10 7V16" stroke-width="1"/>') },
+
+    // Water drop — lymph / flow
+    { keys: ['lymphatic', 'drainage'],
+      icon: SVG('<path d="M10 3L15.5 12A5.5 5.5 0 0 1 4.5 12Z"/>') },
+
+    // Crescent moon — gentle / prenatal
+    { keys: ['prenatal', 'pregnancy', 'maternity'],
+      icon: SVG('<path d="M14 4A7 7 0 1 0 14 16A5 5 0 0 1 14 4Z" fill="none"/>') },
+
+    // Three stacked stones — hot stone massage
+    { keys: ['hot stone', 'stone'],
+      icon: SVG('<ellipse cx="10" cy="15" rx="6" ry="2.2"/><ellipse cx="10" cy="11" rx="4.5" ry="1.9"/><ellipse cx="10" cy="7.5" rx="3" ry="1.6"/>') },
+
+    // Lightning bolt — energy / sport
+    { keys: ['sport', 'athletic', 'recovery'],
+      icon: SVG('<path d="M12 2L6 11H10L8 18L14 9H10L12 2Z"/>') },
+
+    // Three fine vertical lines — acupuncture needles
+    { keys: ['acupuncture', 'needle'],
+      icon: SVG('<line x1="7" y1="3" x2="7" y2="17"/><line x1="10" y1="2" x2="10" y2="16"/><line x1="13" y1="3" x2="13" y2="17"/><circle cx="7" cy="3" r="1" fill="currentColor" stroke="none"/><circle cx="10" cy="2" r="1" fill="currentColor" stroke="none"/><circle cx="13" cy="3" r="1" fill="currentColor" stroke="none"/>') },
+
+    // Radiating circle — visceral / energy work
+    { keys: ['visceral', 'manipulation', 'cranio'],
+      icon: SVG('<circle cx="10" cy="10" r="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/>') },
+
+    // Cup shape — cupping therapy
+    { keys: ['cupping'],
+      icon: SVG('<path d="M6 7H14L13 14H7L6 7Z"/><path d="M5 7Q10 4 15 7"/><line x1="10" y1="14" x2="10" y2="17"/>') },
   ];
 
   // Fallback short descriptions for boards that don't return one from the API
