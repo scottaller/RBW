@@ -456,35 +456,44 @@
     .rbw-conf-txt strong { display: block; font-weight: 600; margin-bottom: 2px; }
     .rbw-conf-txt span { color: var(--rbw-muted); }
 
-    /* Upsell cards */
-    .rbw-upsell-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
-    .rbw-upsell-card {
-      background: var(--rbw-panel); border: 2px solid var(--rbw-border);
-      border-radius: var(--rbw-radius); padding: 14px 16px;
-      display: flex; align-items: center; gap: 14px;
-      transition: border-color .18s;
+    /* Add-on tiles */
+    .rbw-addon-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .rbw-addon-card {
+      background: var(--rbw-panel); border: 2px solid var(--rbw-border); border-radius: 12px;
+      padding: 14px 13px 14px; cursor: pointer; transition: all .18s;
+      display: flex; flex-direction: column; position: relative; min-height: 120px;
     }
-    .rbw-upsell-card.on { border-color: var(--rbw-primary); background: var(--rbw-primary-lt); }
-    .rbw-upsell-info { flex: 1; min-width: 0; }
-    .rbw-upsell-name { font-size: 14px; font-weight: 600; margin-bottom: 2px; color: var(--rbw-text); }
-    .rbw-upsell-desc { font-size: 12px; color: var(--rbw-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .rbw-upsell-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-    .rbw-upsell-price { font-size: 15px; font-weight: 700; color: var(--rbw-purple); }
-    .rbw-upsell-toggle {
-      width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--rbw-border);
-      background: var(--rbw-panel); cursor: pointer; display: flex; align-items: center;
-      justify-content: center; transition: all .18s; flex-shrink: 0; font-size: 18px;
-      color: var(--rbw-muted);
+    .rbw-addon-card:hover { border-color: var(--rbw-primary); transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,0.06); }
+    .rbw-addon-card.on { border-color: var(--rbw-primary); background: var(--rbw-primary-lt); }
+    .rbw-addon-check {
+      position: absolute; top: 10px; right: 10px;
+      width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--rbw-border);
+      background: var(--rbw-panel); display: flex; align-items: center; justify-content: center;
+      transition: all .18s; flex-shrink: 0;
     }
-    .rbw-upsell-card.on .rbw-upsell-toggle {
-      background: var(--rbw-primary); border-color: var(--rbw-primary); color: #fff;
+    .rbw-addon-card.on .rbw-addon-check { background: var(--rbw-primary); border-color: var(--rbw-primary); }
+    .rbw-addon-check svg { width: 11px; height: 11px; stroke: #fff; display: none; }
+    .rbw-addon-card.on .rbw-addon-check svg { display: block; }
+    .rbw-addon-icon {
+      width: 34px; height: 34px; border-radius: 8px; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 9px; flex-shrink: 0; color: var(--rbw-purple);
     }
+    .rbw-addon-icon svg { width: 17px; height: 17px; }
+    .rbw-addon-card.on .rbw-addon-icon { background: rgba(65,47,131,0.15); }
+    .rbw-addon-name { font-size: 12.5px; font-weight: 700; margin-bottom: 4px; line-height: 1.3; color: var(--rbw-text); padding-right: 26px; }
+    .rbw-addon-meta { font-size: 11px; color: var(--rbw-muted); margin-top: auto; padding-top: 6px; }
+    .rbw-addon-meta strong { color: var(--rbw-purple); font-weight: 700; }
     .rbw-upsell-total {
       background: var(--rbw-purple-lt); border: 1px solid rgba(65,47,131,.15);
       border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;
       display: flex; justify-content: space-between; align-items: center; font-size: 14px;
     }
     .rbw-upsell-total span:last-child { font-weight: 700; color: var(--rbw-purple); font-size: 16px; }
+    /* Specialty services section */
+    .rbw-specialty-lbl { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--rbw-muted); margin: 18px 0 10px; }
+    .rbw-type-meta { font-size: 11px; color: var(--rbw-muted); margin-top: 4px; }
+    .rbw-type-meta strong { color: var(--rbw-purple); font-weight: 600; }
 
     /* Alert */
     .rbw-alert { padding: 11px 13px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
@@ -901,59 +910,65 @@
         state._boardsCache = await authGet('/boards');
       }
 
-      // Build one tile per board (not per service).
-      // For massage, only include boards that offer the selected duration.
-      // For acupuncture, include all acupuncture boards and pick their first service.
-      const matchingBoards = [];
+      // Split boards into standard (match selected duration) and specialty (fixed durations)
+      const STANDARD_DURATIONS = new Set([30, 60, 90, 120]);
+      const standardBoards = [], specialtyBoards = [];
+
       state._boardsCache.forEach(board => {
         const isAcuBoard = board.name.toLowerCase().includes('acupuncture');
         if (isAcu !== isAcuBoard) return;
-        const svc = isAcu
-          ? board.services[0]
-          : board.services.find(s => s.minDurationInMinutes === state.duration);
-        if (!svc) return;
-        matchingBoards.push({ board, svc });
+        if (isAcu) { standardBoards.push({ board, svc: board.services[0] }); return; }
+        const svc = board.services.find(s => s.minDurationInMinutes === state.duration);
+        if (svc) { standardBoards.push({ board, svc }); return; }
+        // Specialty: has no service for the selected duration — show with its own pricing
+        const anySvc = board.services.find(s => !STANDARD_DURATIONS.has(s.minDurationInMinutes));
+        if (anySvc) specialtyBoards.push({ board, svc: anySvc, isSpecialty: true });
       });
 
-      grid.innerHTML = '';
-      if (!matchingBoards.length) {
-        const msg = isAcu
-          ? 'No acupuncture services available.'
-          : `No services available for ${state.duration} minutes.`;
-        grid.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;grid-column:1/-1;">${msg}</p>`;
-        return;
-      }
-
-      matchingBoards.forEach(({ board, svc }, idx) => {
+      const makeServiceTile = ({ board, svc, isSpecialty }, idx, isPopularEligible) => {
         const isOn = state.board?.id === board.id;
         const card = document.createElement('div');
         card.className = 'rbw-type-card' + (isOn ? ' on' : '');
-
-        // Icon + fallback description lookup by keywords in board name
         const nameLow = board.name.toLowerCase();
-        const icon = SERVICE_ICONS.find(r => r.keys.some(k => nameLow.includes(k)))?.icon || '✨';
+        const icon = SERVICE_ICONS.find(r => r.keys.some(k => nameLow.includes(k)))?.icon
+          || SVG('<circle cx="10" cy="10" r="7"/><path d="M7 10h6M10 7v6"/>');
         const fallbackDesc = SERVICE_DESCS.find(r => r.keys.some(k => nameLow.includes(k)))?.desc || '';
-        const desc = svc.description || fallbackDesc;
-
-        // Mark the first massage board (or first acu board) as Popular
-        const isPopular = idx === 0;
-
+        const desc = stripHtml(svc.description || '') || fallbackDesc;
+        const isPopular = isPopularEligible && idx === 0;
         card.innerHTML = `
           ${isPopular ? '<div class="rbw-type-badge">Popular</div>' : ''}
           <div class="rbw-type-icon">${icon}</div>
           <div class="rbw-type-name">${board.name}</div>
           ${desc ? `<div class="rbw-type-desc">${desc}</div>` : ''}
+          ${isSpecialty ? `<div class="rbw-type-meta">${svc.minDurationInMinutes} min · <strong>${fmt(svc.priceInCurrency)}</strong></div>` : ''}
         `;
         card.onclick = () => {
           state.board          = { id: board.id, name: board.name };
           state.service        = svc;
           state.selectedAddons = [];
           state._staffCache    = null;
-          if (isAcu) state.duration = svc.minDurationInMinutes;
+          state.duration       = svc.minDurationInMinutes;
           goTo(S.ADDONS);
         };
-        grid.appendChild(card);
-      });
+        return card;
+      };
+
+      grid.innerHTML = '';
+      if (!standardBoards.length && !specialtyBoards.length) {
+        grid.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;grid-column:1/-1;">No services available. Please try another length.</p>`;
+        return;
+      }
+
+      standardBoards.forEach((entry, idx) => grid.appendChild(makeServiceTile(entry, idx, true)));
+
+      if (specialtyBoards.length) {
+        const specialtyLbl = document.createElement('div');
+        specialtyLbl.className = 'rbw-specialty-lbl';
+        specialtyLbl.style.gridColumn = '1 / -1';
+        specialtyLbl.textContent = 'Specialty Services';
+        grid.appendChild(specialtyLbl);
+        specialtyBoards.forEach((entry, idx) => grid.appendChild(makeServiceTile(entry, idx, false)));
+      }
     } catch {
       grid.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;grid-column:1/-1;">Couldn't load services. Please try again.</p>`;
     }
@@ -994,53 +1009,93 @@
   }
 
   // ─── Step 2: Add-ons ─────────────────────────────────────────────────────
-  function renderAddons() {
-    const addons = state.service?.addons || [];
-    if (!addons.length) { goTo(S.CALENDAR); return; }
+  // Strip HTML tags from Momence descriptions that embed raw HTML
+  function stripHtml(str) {
+    if (!str) return '';
+    return str.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Remove leading duration prefix like "30 Minute " from add-on names
+  function cleanAddonName(name) {
+    return name.replace(/^\d+\s+minute\s+/i, '').trim();
+  }
+
+  const ADDON_ICONS = [
+    { keys: ['visceral'],          icon: SVG('<circle cx="10" cy="10" r="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.5" y1="4.5" x2="6" y2="6"/><line x1="14" y1="14" x2="15.5" y2="15.5"/><line x1="15.5" y1="4.5" x2="14" y2="6"/><line x1="6" y1="14" x2="4.5" y2="15.5"/>') },
+    { keys: ['reiki'],             icon: SVG('<path d="M10 2v4M10 14v4M4 10H2M18 10h-4"/><circle cx="10" cy="10" r="3"/><path d="M5.5 5.5l2 2M12.5 12.5l2 2M14.5 5.5l-2 2M7.5 12.5l-2 2"/>') },
+    { keys: ['hand', 'foot', 'scalp', 'renewal'], icon: SVG('<path d="M8 14V8a1 1 0 0 1 2 0v3M10 11V7a1 1 0 0 1 2 0v4M12 11V8a1 1 0 0 1 2 0v5a4 4 0 0 1-8 0v-4a1 1 0 0 1 2 0v3"/>') },
+    { keys: ['cbd'],               icon: SVG('<path d="M10 3C10 3 6 6 6 10s4 7 4 7 4-3 4-7-4-7-4-7Z"/><line x1="10" y1="3" x2="10" y2="17"/>') },
+    { keys: ['cupping'],           icon: SVG('<path d="M6 7H14L13 14H7L6 7Z"/><path d="M5 7Q10 4 15 7"/><line x1="10" y1="14" x2="10" y2="17"/>') },
+  ];
+
+  async function renderAddons() {
+    const allAddons = state.service?.addons || [];
+    if (!allAddons.length) { goTo(S.CALENDAR); return; }
 
     const body = document.getElementById('rbw-body');
     body.innerHTML = `
       <h2 class="rbw-title">Enhance your session</h2>
-      <p class="rbw-subtitle">Add any of these to your ${state.service.name}</p>
+      <p class="rbw-subtitle">Optional add-ons for your ${state.board?.name || 'session'}</p>
       <div id="rbw-summary-bar"></div>
-      <div id="rbw-addon-list" class="rbw-upsell-list"></div>
+      <div id="rbw-addon-grid" class="rbw-addon-grid">
+        <div class="rbw-spin-wrap" style="grid-column:1/-1;padding:24px 0;"><div class="rbw-spinner"></div><span>Loading options…</span></div>
+      </div>
       <div class="rbw-upsell-total" id="rbw-addon-total" style="display:none">
         <span>Add-ons total</span><span id="rbw-addon-total-val"></span>
       </div>
       <div class="rbw-footer">
         <button class="rbw-btn rbw-btn-primary" id="rbw-addon-cta">Continue</button>
-        <button class="rbw-btn rbw-btn-ghost" id="rbw-addon-skip" style="margin-top:8px;">Skip</button>
+        <button class="rbw-btn rbw-btn-ghost" id="rbw-addon-skip" style="margin-top:8px;">No thanks, skip</button>
       </div>
     `;
 
     document.getElementById('rbw-addon-cta').onclick  = () => goTo(S.CALENDAR);
     document.getElementById('rbw-addon-skip').onclick = () => { state.selectedAddons = []; goTo(S.CALENDAR); };
 
-    const list = document.getElementById('rbw-addon-list');
+    const sb = buildSummaryBar();
+    if (sb) document.getElementById('rbw-summary-bar').replaceWith(sb);
+
+    // Filter add-ons to only those where staff can actually perform the service
+    const staffChecks = allAddons.map(addon =>
+      authGet(`/boards/${state.board.id}/staff?serviceId=${addon.id}`)
+        .then(staff => staff.length > 0 ? addon : null)
+        .catch(() => null)
+    );
+    const results  = await Promise.all(staffChecks);
+    const addons   = results.filter(Boolean);
+
+    const grid = document.getElementById('rbw-addon-grid');
+    if (!grid) return;
+
+    if (!addons.length) { goTo(S.CALENDAR); return; }
+
+    grid.innerHTML = '';
     addons.forEach(addon => {
-      const isOn = state.selectedAddons.some(a => a.id === addon.id);
+      const isOn  = state.selectedAddons.some(a => a.id === addon.id);
+      const nameLow = addon.name.toLowerCase();
+      const icon  = ADDON_ICONS.find(r => r.keys.some(k => nameLow.includes(k)))?.icon
+        || SVG('<circle cx="10" cy="10" r="6"/><line x1="10" y1="7" x2="10" y2="13"/><line x1="7" y1="10" x2="13" y2="10"/>');
+      const displayName = cleanAddonName(addon.name);
+      const dur    = addon.durationInMinutes || 0;
+      const checkSvg = SVG('<polyline points="4,10 8,14 16,6"/>', 'stroke-width="2.5"');
+
       const card = document.createElement('div');
-      card.className = 'rbw-upsell-card' + (isOn ? ' on' : '');
+      card.className = 'rbw-addon-card' + (isOn ? ' on' : '');
       card.innerHTML = `
-        <div class="rbw-upsell-info">
-          <div class="rbw-upsell-name">${addon.name}</div>
-          ${addon.description ? `<div class="rbw-upsell-desc">${addon.description}</div>` : ''}
-        </div>
-        <div class="rbw-upsell-right">
-          <div class="rbw-upsell-price">+${fmt(addon.priceInCurrency)}</div>
-          <button class="rbw-upsell-toggle" aria-label="Add ${addon.name}">${isOn ? '✓' : '+'}</button>
-        </div>
+        <div class="rbw-addon-check">${checkSvg}</div>
+        <div class="rbw-addon-icon">${icon}</div>
+        <div class="rbw-addon-name">${displayName}</div>
+        <div class="rbw-addon-meta">${dur ? `+${dur} min · ` : ''}<strong>+${fmt(addon.priceInCurrency)}</strong></div>
       `;
       card.onclick = () => {
         const idx = state.selectedAddons.findIndex(a => a.id === addon.id);
         if (idx >= 0) state.selectedAddons.splice(idx, 1);
-        else state.selectedAddons.push({ id: addon.id, name: addon.name, priceInCurrency: addon.priceInCurrency, durationInMinutes: addon.durationInMinutes || 0 });
-        updateAddonTotal();
+        else state.selectedAddons.push({ id: addon.id, name: addon.name, priceInCurrency: addon.priceInCurrency, durationInMinutes: dur });
         const nowOn = state.selectedAddons.some(a => a.id === addon.id);
         card.classList.toggle('on', nowOn);
-        card.querySelector('.rbw-upsell-toggle').textContent = nowOn ? '✓' : '+';
+        updateAddonTotal();
       };
-      list.appendChild(card);
+      grid.appendChild(card);
     });
 
     updateAddonTotal();
