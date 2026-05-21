@@ -2,7 +2,7 @@
   "name": "rbw-booking-widget",
   "version": "1.0.0",
   "scripts": {
-    "build": "cd backend && npm ci",
+    "build": "cd backend && npm ci && cp ../widget.js .",
     "start": "node backend/server.js"
   },
   "engines": {

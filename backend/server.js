@@ -38,6 +38,18 @@ app.use(express.json());
 // Serve the widget root as static files so demo.html works at localhost:3001
 app.use(express.static(path.join(__dirname, '..')));
 
+// Explicit route for widget.js — Railway build copies widget.js into backend/
+// so __dirname/widget.js is always present in production. Falls back to the
+// parent-dir path for local dev where the copy step doesn't run.
+const fs = require('fs');
+const WIDGET_PATH = fs.existsSync(path.join(__dirname, 'widget.js'))
+  ? path.join(__dirname, 'widget.js')
+  : path.join(__dirname, '..', 'widget.js');
+app.get('/widget.js', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.sendFile(WIDGET_PATH);
+});
+
 // ─── Momence readonly helpers ──────────────────────────────────────────────
 async function readonlyGet(path, params = {}) {
   const qs = Object.keys(params).length ? '?' + new URLSearchParams(params).toString() : '';
