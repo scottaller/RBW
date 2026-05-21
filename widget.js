@@ -92,10 +92,13 @@
       selectedPmId: null,
       selectedMbId: null,
       // Session caches (persist for panel lifetime)
-      _boardsCache:   null,
-      _staffCache:    null,
-      _teachersCache: null,
-      _skippedAddons: false,
+      _boardsCache:    null,
+      _staffCache:     null,
+      _teachersCache:  null,
+      _skippedAddons:  false,
+      // Therapist IDs who can perform the current service + ALL selected add-ons
+      // Null = not yet computed; populated by loadCalendarStaff
+      _validStaffIds:  null,
     };
   }
   let state = freshState();
@@ -1294,10 +1297,23 @@
     const sb = buildSummaryBar();
     if (sb) document.getElementById('rbw-summary-bar').replaceWith(sb);
 
-    // Filter add-ons to only those where staff can actually perform the service
+    // Get base service staff first — only add-ons performable by the SAME therapists
+    // who can do the main service should be shown.
+    let baseStaffIds = null;
+    try {
+      const baseStaff = await authGet(`/boards/${state.board.id}/staff?serviceId=${state.service.appointmentServiceId}`);
+      baseStaffIds = new Set(baseStaff.map(m => m.teacherId));
+    } catch { /* skip intersection check if base staff fails */ }
+
+    // Filter add-ons: must have at least one therapist who can do BOTH service + addon
     const staffChecks = allAddons.map(addon =>
       authGet(`/boards/${state.board.id}/staff?serviceId=${addon.id}`)
-        .then(staff => staff.length > 0 ? addon : null)
+        .then(addonStaff => {
+          if (!addonStaff.length) return null;
+          // If we have base staff, require at least one overlapping therapist
+          if (baseStaffIds && !addonStaff.some(m => baseStaffIds.has(m.teacherId))) return null;
+          return addon;
+        })
         .catch(() => null)
     );
     const results  = await Promise.all(staffChecks);
@@ -1617,7 +1633,8 @@
       }, baseStaff.map(m => m.teacherId));
 
       const filteredStaff = baseStaff.filter(m => validIds.includes(m.teacherId));
-      state._staffCache = filteredStaff;
+      state._staffCache   = filteredStaff;
+      state._validStaffIds = new Set(filteredStaff.map(m => m.teacherId));
 
       // Auto-select if only one therapist qualifies
       if (filteredStaff.length === 1 && !state.staffId) {
@@ -1628,7 +1645,8 @@
 
       renderTherapistChips(filteredStaff);
     } catch {
-      state._staffCache = [];
+      state._staffCache    = [];
+      state._validStaffIds = null;
       renderTherapistChips([]);
     }
 
@@ -1728,12 +1746,7 @@
         if (!boardId || !serviceId) return;
 
         const end = new Date(start); end.setDate(end.getDate() + 14);
-        let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${fmtD(start)}&to=${fmtD(end)}`;
-        if (state.staffId) qs += `&staffId=${state.staffId}`;
-
-        const data = await authGet(qs);
-        const raw  = Array.isArray(data) ? data.flat() : [];
-        const open = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+        const open = await fetchServiceAvailability(fmtD(start), fmtD(end));
 
         if (!open.length) {
           if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
@@ -1756,6 +1769,42 @@
     } catch {
       if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">Couldn't load availability. Please try again.</p>`;
     }
+  }
+
+  // Build the correct available-times query string for the service path,
+  // respecting add-on staff constraints when no specific therapist is selected.
+  // If add-ons narrow staff to a subset, queries each valid therapist separately
+  // and merges results (deduped by minute offset).
+  async function fetchServiceAvailability(from, to) {
+    const boardId   = state.board?.id;
+    const serviceId = state.service?.appointmentServiceId;
+    if (!boardId || !serviceId) return [];
+
+    // If a specific therapist is selected, use them directly
+    if (state.staffId) {
+      const data = await authGet(`/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}&staffId=${state.staffId}`);
+      const raw  = Array.isArray(data) ? data.flat() : [];
+      return raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+    }
+
+    // If add-ons have restricted staff, query each valid therapist separately
+    const validStaff = state._validStaffIds;
+    if (validStaff && validStaff.size > 0 && state.selectedAddons.length > 0) {
+      const perStaff = await Promise.all(
+        [...validStaff].map(sid =>
+          authGet(`/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}&staffId=${sid}`)
+            .then(d => (Array.isArray(d) ? d.flat() : []))
+            .catch(() => [])
+        )
+      );
+      // Flatten and filter
+      return perStaff.flat().filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+    }
+
+    // No restriction — return all therapists' slots
+    const data = await authGet(`/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}`);
+    const raw  = Array.isArray(data) ? data.flat() : [];
+    return raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
   }
 
   // Convert a slot from /api/availability format to a local slot object
@@ -1807,14 +1856,8 @@
         // Service path: board-based availability
         const nextDay = new Date(date); nextDay.setDate(nextDay.getDate() + 1);
         const toStr   = `${nextDay.getFullYear()}-${p2(nextDay.getMonth() + 1)}-${p2(nextDay.getDate())}`;
-        const boardId   = state.board?.id;
-        const serviceId = state.service?.appointmentServiceId;
-        if (!boardId || !serviceId) return;
-        let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${dateStr}&to=${toStr}`;
-        if (state.staffId) qs += `&staffId=${state.staffId}`;
-        const data = await authGet(qs);
-        const raw  = Array.isArray(data) ? data.flat() : [];
-        const open = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+        if (!state.board?.id || !state.service?.appointmentServiceId) return;
+        const open = await fetchServiceAvailability(dateStr, toStr);
         renderAvailability(open, section);
       }
     } catch {
