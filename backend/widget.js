@@ -1,0 +1,2776 @@
+/**
+ * Revive Bodywork Booking Widget
+ * Slide-in booking panel powered by the Momence (Ribbon) v1 API.
+ *
+ * Usage:
+ *   <script src="widget.js"
+ *     data-host-id="37574"
+ *     data-token="35055b6efa"
+ *     data-api-url="http://localhost:3001/api"
+ *   ></script>
+ *
+ * Trigger from any element:
+ *   <button data-rbw-book>Book Now</button>
+ *
+ * Floating button:
+ *   Add data-rbw-floating="true" to the <script> tag.
+ */
+
+(function () {
+  'use strict';
+
+  // ─── Config ────────────────────────────────────────────────────────────────
+  const scriptTag  = document.currentScript || document.querySelector('script[data-host-id]');
+  const PROXY_URL  = (scriptTag && scriptTag.getAttribute('data-api-url'))   || '/api';
+  const FLOATING   = scriptTag && scriptTag.getAttribute('data-rbw-floating') === 'true';
+
+  // Steps
+  const S = {
+    INTENT:         'intent',         // landing — how do you want to book?
+    CATEGORY:       'category',       // Massage or Acupuncture (legacy, kept for acupuncture path)
+    DURATION:       'duration',       // length + service (one page)
+    ADDONS:         'addons',         // pick add-ons
+    THERAPIST_PICK: 'therapist-pick', // browse therapists with photos
+    THERAPIST:      'therapist',      // pick therapist or "any" (legacy)
+    CALENDAR:       'calendar',       // pick date + time
+    REVIEW:         'review',         // order summary + promo
+    AUTH:           'auth',           // login / register
+    CHECKOUT:       'checkout',       // payment
+    CONFIRMATION:   'confirmation',   // done
+  };
+
+  const PROGRESS = {
+    [S.INTENT]:         5,
+    [S.CATEGORY]:       10,
+    [S.DURATION]:       25,
+    [S.ADDONS]:         40,
+    [S.THERAPIST_PICK]: 18,
+    [S.THERAPIST]:      50,
+    [S.CALENDAR]:       65,
+    [S.REVIEW]:         78,
+    [S.AUTH]:           88,
+    [S.CHECKOUT]:       95,
+    [S.CONFIRMATION]:   100,
+  };
+
+  const BACK_TO = {
+    [S.CATEGORY]:       S.INTENT,
+    [S.DURATION]:       S.INTENT,
+    [S.ADDONS]:         S.DURATION,
+    [S.THERAPIST_PICK]: S.INTENT,
+    [S.CALENDAR]:       S.ADDONS,
+    [S.REVIEW]:         S.CALENDAR,
+    [S.AUTH]:           S.REVIEW,
+    [S.CHECKOUT]:       S.REVIEW,
+  };
+
+  // Populated from /api/config on init; defaults match .env
+  const HIDDEN_PRODUCT_IDS = new Set();
+  const PRICES = { 30: 75, 60: 120, 90: 180, 120: 240 };
+
+  // ─── State ─────────────────────────────────────────────────────────────────
+  function freshState() {
+    return {
+      step:         S.INTENT,
+      path:         null,   // 'service' | 'therapist' | 'time'
+      category:     null,   // 'massage' | 'acupuncture'
+      duration:     null,   // 30 | 60 | 90 | 120
+      board:        null,   // { id, name } selected board
+      service:      null,   // { appointmentServiceId, name, priceInCurrency, addons, ... }
+      selectedAddons:  [],  // [{ id, name, priceInCurrency, durationInMinutes }]
+      staffId:      null,   // teacherId or null = any available
+      staffName:    null,   // display name for review
+      staffPhoto:   null,   // profile image URL for selected therapist
+      selectedDate: null,
+      selectedSlot: null,   // { isoValue, time }
+      promoCode:    null,   // { code, discount, final } when applied
+      token:        null,
+      authMode:     'login',
+      memberProfile:       null,
+      savedPaymentMethods: [],
+      activeMemberships:   [],
+      selectedPmId: null,
+      selectedMbId: null,
+      // Session caches (persist for panel lifetime)
+      _boardsCache:    null,
+      _staffCache:     null,
+      _teachersCache:  null,
+      _skippedAddons:  false,
+      // Therapist IDs who can perform the current service + ALL selected add-ons
+      // Null = not yet computed; populated by loadCalendarStaff
+      _validStaffIds:  null,
+    };
+  }
+  let state = freshState();
+
+  // ─── All API calls route through the backend proxy ─────────────────────────
+  // Authenticated GET — sends the member Bearer token when available.
+  async function authGet(path) {
+    const headers = {};
+    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    const res = await fetch(PROXY_URL + path, { headers });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `API error ${res.status}`);
+    }
+    return res.json();
+  }
+
+  async function proxyPost(path, body) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    const res = await fetch(PROXY_URL + path, {
+      method: 'POST', headers, body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Request failed');
+    return data;
+  }
+
+  // ─── CSS ───────────────────────────────────────────────────────────────────
+  const CSS = `
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400&display=swap');
+
+    :root {
+      --rbw-primary:      #F39C44;
+      --rbw-primary-dk:   #E68C3A;
+      --rbw-primary-lt:   #FEF3E4;
+      --rbw-purple:       #412F83;
+      --rbw-purple-lt:    #EEE9F8;
+      --rbw-bg:           #F6F6F6;
+      --rbw-panel:        #FFFFFF;
+      --rbw-text:         #3E3E3E;
+      --rbw-muted:        #999999;
+      --rbw-border:       #E7E7E7;
+      --rbw-radius:       12px;
+      --rbw-w:            420px;
+      --rbw-font: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    /* Overlay */
+    #rbw-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(42,40,37,0.45); backdrop-filter: blur(2px);
+      z-index: 99998; cursor: pointer;
+      opacity: 0; transition: opacity 0.3s ease;
+    }
+    #rbw-overlay.rbw-show { opacity: 1; }
+
+    /* Panel */
+    #rbw-panel {
+      position: fixed; top: 0; right: 0; bottom: 0;
+      width: var(--rbw-w); max-width: 100vw;
+      background: var(--rbw-panel);
+      z-index: 99999;
+      transform: translateX(100%);
+      transition: transform 0.35s cubic-bezier(0.4,0,0.2,1);
+      display: flex; flex-direction: column;
+      font-family: var(--rbw-font);
+      color: var(--rbw-text);
+      box-shadow: 0 8px 48px rgba(0,0,0,0.2);
+    }
+    #rbw-panel.rbw-open { transform: translateX(0); }
+
+    /* Header */
+    .rbw-hdr {
+      display: flex; align-items: center;
+      padding: 14px 18px; gap: 10px;
+      border-bottom: 1px solid var(--rbw-border);
+      background: #fff; flex-shrink: 0;
+    }
+    .rbw-hdr-brand {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+    }
+    .rbw-hdr-brand b {
+      font-size: 13px; font-weight: 700;
+      letter-spacing: 0.09em; text-transform: uppercase; color: var(--rbw-purple);
+    }
+    .rbw-hdr-brand small {
+      font-size: 10px; color: var(--rbw-muted);
+      letter-spacing: 0.05em; text-transform: uppercase;
+    }
+    .rbw-icon-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--rbw-muted); width: 36px; height: 36px;
+      border-radius: 50%; display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s; flex-shrink: 0;
+    }
+    .rbw-icon-btn:hover { background: var(--rbw-purple-lt); color: var(--rbw-purple); }
+    .rbw-icon-btn svg { width: 18px; height: 18px; }
+
+    /* Progress */
+    .rbw-prog { height: 3px; background: var(--rbw-border); flex-shrink: 0; }
+    .rbw-prog-fill { height: 100%; background: var(--rbw-primary); transition: width 0.4s ease; }
+
+    /* Scroll body */
+    #rbw-body {
+      flex: 1; overflow-y: auto; overflow-x: hidden;
+      padding: 22px 20px 220px; background: var(--rbw-bg);
+    }
+    #rbw-body::-webkit-scrollbar { width: 4px; }
+    #rbw-body::-webkit-scrollbar-thumb { background: var(--rbw-border); border-radius: 4px; }
+
+    /* Sticky footer */
+    .rbw-footer {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      padding: 14px 20px; background: #fff;
+      border-top: 1px solid var(--rbw-border);
+    }
+
+    /* Typography */
+    .rbw-title    { font-size: 20px; font-weight: 700; margin: 0 0 4px; }
+    .rbw-subtitle { font-size: 14px; color: var(--rbw-muted); margin: 0 0 20px; }
+    .rbw-lbl      { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--rbw-muted); margin-bottom: 10px; }
+
+    /* Buttons */
+    .rbw-btn {
+      display: block; width: 100%; padding: 13px 18px;
+      border: none; border-radius: var(--rbw-radius);
+      font-family: var(--rbw-font); font-size: 15px; font-weight: 600;
+      cursor: pointer; text-align: center; text-decoration: none;
+      transition: all 0.18s;
+    }
+    .rbw-btn-primary  { background: var(--rbw-primary); color: #fff; }
+    .rbw-btn-primary:hover { background: var(--rbw-primary-dk); transform: translateY(-1px); }
+    .rbw-btn-primary:disabled { background: var(--rbw-border); color: var(--rbw-muted); cursor: not-allowed; transform: none; }
+    .rbw-btn-outline  { background: transparent; color: var(--rbw-purple); border: 2px solid var(--rbw-purple); }
+    .rbw-btn-outline:hover { background: var(--rbw-purple-lt); }
+    .rbw-btn-ghost    { background: transparent; color: var(--rbw-muted); font-weight: 400; font-size: 14px; }
+    .rbw-btn-ghost:hover { color: var(--rbw-text); }
+    .btn-sm {
+      display: inline-block; width: auto; padding: 9px 18px;
+      margin: 10px auto 0; font-size: 14px;
+    }
+
+    /* Duration grid */
+    .rbw-dur-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 22px; }
+    .rbw-dur-card {
+      border: 2px solid var(--rbw-border); border-radius: 10px;
+      padding: 14px 10px; cursor: pointer; text-align: center;
+      transition: all 0.18s; background: var(--rbw-panel);
+    }
+    .rbw-dur-card:hover { border-color: var(--rbw-primary); background: var(--rbw-primary-lt); }
+    .rbw-dur-card.on { border-color: var(--rbw-primary); background: var(--rbw-primary); color: #fff; }
+    .rbw-dur-time  { font-size: 17px; font-weight: 700; }
+    .rbw-dur-price { font-size: 13px; opacity: 0.8; margin-top: 2px; }
+
+    /* Intro Offers featured button */
+    .rbw-intro-btn {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--rbw-purple); color: #fff; border: none; border-radius: 12px;
+      padding: 15px 18px; cursor: pointer; width: 100%; margin-bottom: 14px;
+      font-family: inherit; transition: all .18s; text-align: left;
+    }
+    .rbw-intro-btn:hover { background: #352470; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(65,47,131,0.3); }
+    .rbw-intro-btn-left { display: flex; flex-direction: column; gap: 2px; }
+    .rbw-intro-btn-label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.75; }
+    .rbw-intro-btn-title { font-size: 16px; font-weight: 700; }
+    .rbw-intro-btn-arrow { font-size: 20px; opacity: 0.6; }
+
+    /* Type grid */
+    .rbw-type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 22px; }
+    .rbw-type-card {
+      border: 2px solid var(--rbw-border); border-radius: 12px;
+      padding: 14px 13px 16px; cursor: pointer; transition: all 0.18s; background: var(--rbw-panel);
+      display: flex; flex-direction: column; position: relative; min-height: 148px;
+    }
+    .rbw-type-card:hover { border-color: var(--rbw-purple); transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.07); }
+    .rbw-type-card.on { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
+    .rbw-type-icon {
+      width: 36px; height: 36px; border-radius: 9px; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 10px; flex-shrink: 0; color: var(--rbw-purple);
+    }
+    .rbw-type-icon svg { width: 18px; height: 18px; }
+    .rbw-type-card.on .rbw-type-icon { background: rgba(65,47,131,0.15); }
+    .rbw-type-name { font-size: 13px; font-weight: 700; margin-bottom: 4px; line-height: 1.3; color: var(--rbw-text); }
+    .rbw-type-desc {
+      font-size: 11.5px; color: var(--rbw-muted); line-height: 1.45;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .rbw-type-badge {
+      position: absolute; top: 10px; right: 10px;
+      background: var(--rbw-primary); color: #fff;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      padding: 2px 7px; border-radius: 20px;
+    }
+
+    /* Calendar */
+    .rbw-cal { background: var(--rbw-panel); border: 1px solid var(--rbw-border); border-radius: var(--rbw-radius); overflow: hidden; margin-bottom: 20px; }
+    .rbw-cal-hdr { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--rbw-purple); color: #fff; }
+    .rbw-cal-hdr h3 { margin: 0; font-size: 15px; font-weight: 600; }
+    .rbw-cal-nav { background: rgba(255,255,255,.2); border: none; color: #fff; width: 30px; height: 30px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; transition: background .15s; }
+    .rbw-cal-nav:hover { background: rgba(255,255,255,.35); }
+    .rbw-cal-grid { display: grid; grid-template-columns: repeat(7,1fr); }
+    .rbw-cal-dow { text-align: center; padding: 8px 2px; font-size: 11px; font-weight: 700; color: var(--rbw-muted); text-transform: uppercase; }
+    .rbw-cal-wrap { display: flex; justify-content: center; padding: 2px; }
+    .rbw-cal-day {
+      width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+      font-size: 13px; border-radius: 50%; cursor: pointer; transition: all .15s;
+    }
+    .rbw-cal-day:hover:not(.past):not(.empty) { background: var(--rbw-primary-lt); color: var(--rbw-primary-dk); }
+    .rbw-cal-day.today  { font-weight: 700; color: var(--rbw-purple); }
+    .rbw-cal-day.picked { background: var(--rbw-primary); color: #fff; font-weight: 700; }
+    .rbw-cal-day.past   { color: var(--rbw-border); cursor: default; }
+    .rbw-cal-day.empty  { cursor: default; }
+
+    /* Gender filter */
+    .rbw-gender { display: flex; gap: 8px; margin-bottom: 14px; }
+    .rbw-gender-btn {
+      flex: 1; padding: 8px 4px; border: 2px solid var(--rbw-border);
+      border-radius: 8px; background: var(--rbw-panel);
+      font-family: var(--rbw-font); font-size: 13px; font-weight: 500;
+      cursor: pointer; text-align: center; transition: all .15s;
+    }
+    .rbw-gender-btn:hover { border-color: var(--rbw-primary); }
+    .rbw-gender-btn.on { border-color: var(--rbw-primary); background: var(--rbw-primary); color: #fff; }
+
+    /* Therapist list */
+    .rbw-tx-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+    .rbw-tx-card {
+      background: var(--rbw-panel); border: 2px solid var(--rbw-border);
+      border-radius: var(--rbw-radius); padding: 12px 14px;
+      display: flex; align-items: center; gap: 12px;
+      cursor: pointer; transition: all .18s;
+    }
+    .rbw-tx-card:hover { border-color: var(--rbw-purple); }
+    .rbw-tx-card.on { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
+    .rbw-tx-avatar {
+      width: 44px; height: 44px; border-radius: 50%;
+      background: var(--rbw-purple-lt); display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 15px; color: var(--rbw-purple); flex-shrink: 0; overflow: hidden;
+    }
+    .rbw-tx-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .rbw-tx-name { font-size: 14px; font-weight: 600; }
+    .rbw-tx-spec { font-size: 12px; color: var(--rbw-muted); }
+    .rbw-tx-arrow { margin-left: auto; color: var(--rbw-muted); }
+
+    /* First Available card */
+    .rbw-first-avail {
+      background: linear-gradient(135deg, var(--rbw-purple) 0%, #2d1f6b 100%);
+      border-radius: var(--rbw-radius); padding: 20px; margin-bottom: 20px; color: #fff;
+    }
+    .rbw-first-avail-label {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+      opacity: 0.75; margin-bottom: 10px; display: flex; align-items: center; gap: 6px;
+    }
+    .rbw-first-avail-time { font-size: 28px; font-weight: 700; line-height: 1; margin-bottom: 4px; }
+    .rbw-first-avail-date { font-size: 13px; opacity: 0.8; margin-bottom: 12px; }
+    .rbw-first-avail-therapist { font-size: 13px; opacity: 0.85; margin-bottom: 12px; font-weight: 500; }
+    .rbw-first-avail-btn {
+      background: var(--rbw-primary); color: #fff; border: none; border-radius: 8px;
+      padding: 11px 18px; font-family: var(--rbw-font); font-size: 14px; font-weight: 700;
+      cursor: pointer; width: 100%; transition: background .15s;
+    }
+    .rbw-first-avail-btn:hover { background: var(--rbw-primary-dk); }
+
+    /* Divider with text */
+    .rbw-or { display: flex; align-items: center; gap: 10px; margin: 16px 0 14px; color: var(--rbw-muted); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .rbw-or::before, .rbw-or::after { content: ''; flex: 1; height: 1px; background: var(--rbw-border); }
+
+    /* Slot list (time + therapist per row) */
+    .rbw-slot-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+    .rbw-slot-row {
+      background: var(--rbw-panel); border: 2px solid var(--rbw-border);
+      border-radius: 10px; padding: 11px 14px;
+      display: flex; align-items: center; gap: 12px;
+      cursor: pointer; transition: all .15s;
+    }
+    .rbw-slot-row:hover { border-color: var(--rbw-primary); }
+    .rbw-slot-row.on { border-color: var(--rbw-primary); background: var(--rbw-primary-lt); }
+    .rbw-slot-row.on .rbw-slot-time { color: var(--rbw-primary-dk); }
+    .rbw-slot-time { font-size: 15px; font-weight: 700; min-width: 72px; color: var(--rbw-text); }
+    .rbw-slot-tx { display: flex; align-items: center; gap: 8px; flex: 1; }
+    .rbw-slot-avatar {
+      width: 30px; height: 30px; border-radius: 50%;
+      background: var(--rbw-purple-lt); color: var(--rbw-purple);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; flex-shrink: 0; overflow: hidden;
+    }
+    .rbw-slot-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .rbw-slot-tx-name { font-size: 13px; font-weight: 500; }
+    .rbw-slot-check { margin-left: auto; color: var(--rbw-primary); font-weight: 700; font-size: 16px; opacity: 0; }
+    .rbw-slot-row.on .rbw-slot-check { opacity: 1; }
+    .rbw-no-avail { text-align: center; padding: 28px 16px; color: var(--rbw-muted); font-size: 14px; }
+
+    /* Time chip picker */
+    .rbw-time-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 0; }
+    .rbw-time-chip {
+      padding: 9px 16px; border: 2px solid var(--rbw-border); border-radius: 22px;
+      font-family: var(--rbw-font); font-size: 13px; font-weight: 600;
+      cursor: pointer; background: var(--rbw-panel); color: var(--rbw-text);
+      transition: all .15s; white-space: nowrap;
+    }
+    .rbw-time-chip:hover { border-color: var(--rbw-primary); color: var(--rbw-primary-dk); }
+    .rbw-time-chip.on { border-color: var(--rbw-primary); background: var(--rbw-primary); color: #fff; }
+
+    /* Therapist avatar chips (calendar filter) */
+    .rbw-tx-chips { display: flex; gap: 14px; overflow-x: auto; padding: 4px 0 10px; margin-bottom: 16px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    .rbw-tx-chips::-webkit-scrollbar { display: none; }
+    .rbw-tx-chip { display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; flex-shrink: 0; min-width: 52px; }
+    .rbw-tx-chip-avatar {
+      width: 48px; height: 48px; border-radius: 50%; border: 3px solid transparent;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 700; overflow: hidden;
+      transition: border-color .18s, box-shadow .18s;
+    }
+    .rbw-tx-chip-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .rbw-tx-chip.on .rbw-tx-chip-avatar { border-color: var(--rbw-purple); box-shadow: 0 0 0 3px var(--rbw-purple-lt); }
+    .rbw-tx-chip-name { font-size: 10px; font-weight: 600; color: var(--rbw-muted); text-align: center; max-width: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color .18s; }
+    .rbw-tx-chip.on .rbw-tx-chip-name { color: var(--rbw-purple); }
+
+    /* Auth */
+    .rbw-tabs { display: flex; border-bottom: 2px solid var(--rbw-border); margin-bottom: 20px; }
+    .rbw-tab {
+      flex: 1; padding: 11px; background: none; border: none;
+      font-family: var(--rbw-font); font-size: 14px; font-weight: 500;
+      color: var(--rbw-muted); cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all .15s;
+    }
+    .rbw-tab.on { color: var(--rbw-purple); border-bottom-color: var(--rbw-purple); font-weight: 700; }
+
+    /* Form */
+    .rbw-fgrp { margin-bottom: 13px; }
+    .rbw-frow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .rbw-flbl { display: block; font-size: 11px; font-weight: 700; color: var(--rbw-muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .05em; }
+    .rbw-input {
+      width: 100%; padding: 11px 13px;
+      border: 2px solid var(--rbw-border); border-radius: 8px;
+      font-family: var(--rbw-font); font-size: 15px; color: var(--rbw-text);
+      background: var(--rbw-panel); transition: border-color .15s; box-sizing: border-box;
+    }
+    .rbw-input:focus { outline: none; border-color: var(--rbw-purple); }
+
+    /* Order summary */
+    .rbw-summary { background: var(--rbw-panel); border: 1px solid var(--rbw-border); border-radius: var(--rbw-radius); overflow: hidden; margin-bottom: 20px; }
+    .rbw-sum-hdr { background: var(--rbw-purple); color: #fff; padding: 13px 16px; font-weight: 700; font-size: 14px; }
+    .rbw-sum-row { display: flex; justify-content: space-between; padding: 11px 16px; border-bottom: 1px solid var(--rbw-border); font-size: 14px; }
+    .rbw-sum-row:last-child { border-bottom: none; }
+    .rbw-sum-row.total { font-weight: 700; font-size: 16px; }
+    .rbw-sum-lbl { color: var(--rbw-muted); }
+
+    /* Confirmation */
+    .rbw-check-icon { width: 72px; height: 72px; border-radius: 50%; background: var(--rbw-primary-lt); display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; }
+    .rbw-check-icon svg { width: 36px; height: 36px; color: var(--rbw-primary-dk); }
+    .rbw-conf-title { text-align: center; font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    .rbw-conf-sub { text-align: center; font-size: 14px; color: var(--rbw-muted); margin-bottom: 24px; }
+    .rbw-conf-card { background: var(--rbw-panel); border: 1px solid var(--rbw-border); border-radius: var(--rbw-radius); overflow: hidden; margin-bottom: 20px; }
+    .rbw-conf-row { display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-bottom: 1px solid var(--rbw-border); font-size: 14px; }
+    .rbw-conf-row:last-child { border-bottom: none; }
+    .rbw-conf-ico { color: var(--rbw-purple); flex-shrink: 0; padding-top: 1px; }
+    .rbw-conf-ico svg { width: 16px; height: 16px; }
+    .rbw-conf-txt strong { display: block; font-weight: 600; margin-bottom: 2px; }
+    .rbw-conf-txt span { color: var(--rbw-muted); }
+
+    /* Add-on tiles */
+    .rbw-addon-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .rbw-addon-card {
+      background: var(--rbw-panel); border: 2px solid var(--rbw-border); border-radius: 12px;
+      padding: 14px 13px 14px; cursor: pointer; transition: all .18s;
+      display: flex; flex-direction: column; position: relative; min-height: 120px;
+    }
+    .rbw-addon-card:hover { border-color: var(--rbw-primary); transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,0.06); }
+    .rbw-addon-card.on { border-color: var(--rbw-primary); background: var(--rbw-primary-lt); }
+    .rbw-addon-check {
+      position: absolute; top: 10px; right: 10px;
+      width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--rbw-border);
+      background: var(--rbw-panel); display: flex; align-items: center; justify-content: center;
+      transition: all .18s; flex-shrink: 0;
+    }
+    .rbw-addon-card.on .rbw-addon-check { background: var(--rbw-primary); border-color: var(--rbw-primary); }
+    .rbw-addon-check svg { width: 11px; height: 11px; stroke: #fff; display: none; }
+    .rbw-addon-card.on .rbw-addon-check svg { display: block; }
+    .rbw-addon-icon {
+      width: 34px; height: 34px; border-radius: 8px; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 9px; flex-shrink: 0; color: var(--rbw-purple);
+    }
+    .rbw-addon-icon svg { width: 17px; height: 17px; }
+    .rbw-addon-card.on .rbw-addon-icon { background: rgba(65,47,131,0.15); }
+    .rbw-addon-name { font-size: 12.5px; font-weight: 700; margin-bottom: 4px; line-height: 1.3; color: var(--rbw-text); padding-right: 26px; }
+    .rbw-addon-meta { font-size: 11px; color: var(--rbw-muted); margin-top: auto; padding-top: 6px; }
+    .rbw-addon-meta strong { color: var(--rbw-purple); font-weight: 700; }
+    .rbw-upsell-total {
+      background: var(--rbw-purple-lt); border: 1px solid rgba(65,47,131,.15);
+      border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;
+      display: flex; justify-content: space-between; align-items: center; font-size: 14px;
+    }
+    .rbw-upsell-total span:last-child { font-weight: 700; color: var(--rbw-purple); font-size: 16px; }
+    /* Specialty services section */
+    .rbw-specialty-lbl { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--rbw-muted); margin: 18px 0 10px; }
+    .rbw-type-meta { font-size: 11px; color: var(--rbw-muted); margin-top: 4px; }
+    .rbw-type-meta strong { color: var(--rbw-purple); font-weight: 600; }
+
+    /* Alert */
+    .rbw-alert { padding: 11px 13px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
+    .rbw-err { background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; }
+
+    /* Divider */
+    .rbw-divider { display: flex; align-items: center; gap: 10px; margin: 12px 0; color: var(--rbw-muted); font-size: 13px; }
+    .rbw-divider::before, .rbw-divider::after { content: ''; flex: 1; height: 1px; background: var(--rbw-border); }
+
+    /* Spinner */
+    .rbw-spin-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 56px 20px; gap: 14px; color: var(--rbw-muted); font-size: 14px; }
+    .rbw-spinner { width: 34px; height: 34px; border: 3px solid var(--rbw-border); border-top-color: var(--rbw-primary); border-radius: 50%; animation: rbw-spin .7s linear infinite; }
+    @keyframes rbw-spin { to { transform: rotate(360deg); } }
+
+    /* Floating trigger */
+    #rbw-float {
+      position: fixed; bottom: 28px; right: 28px; z-index: 99997;
+      background: var(--rbw-primary); color: #fff; border: none;
+      border-radius: 50px; padding: 14px 24px;
+      font-family: var(--rbw-font); font-size: 15px; font-weight: 600;
+      cursor: pointer; display: flex; align-items: center; gap: 8px;
+      box-shadow: 0 4px 20px rgba(243,156,68,.45);
+      transition: all .2s;
+    }
+    #rbw-float:hover { transform: translateY(-2px); box-shadow: 0 6px 28px rgba(243,156,68,.55); }
+    #rbw-float svg { width: 18px; height: 18px; }
+
+    /* Payment method cards */
+    .rbw-pm-card {
+      background: var(--rbw-panel); border: 2px solid var(--rbw-border);
+      border-radius: var(--rbw-radius); padding: 14px 16px;
+      display: flex; align-items: center; justify-content: space-between;
+      cursor: pointer; transition: all .18s; margin-bottom: 10px;
+    }
+    .rbw-pm-card:hover { border-color: var(--rbw-purple); }
+    .rbw-pm-card.on { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
+    .rbw-pm-info { display: flex; align-items: center; gap: 12px; }
+    .rbw-pm-icon { font-size: 22px; line-height: 1; }
+    .rbw-pm-name { font-size: 14px; font-weight: 600; color: var(--rbw-text); }
+    .rbw-pm-detail { font-size: 12px; color: var(--rbw-muted); margin-top: 1px; }
+    .rbw-pm-check { color: var(--rbw-purple); font-weight: 700; font-size: 16px; flex-shrink: 0; }
+    .rbw-pm-empty {
+      border: 2px dashed var(--rbw-border); border-radius: var(--rbw-radius);
+      padding: 20px 16px; text-align: center; margin-bottom: 16px;
+    }
+    .rbw-pm-empty p { font-size: 13px; color: var(--rbw-muted); margin: 0 0 12px; }
+
+    /* Category cards (step 0) */
+    .rbw-cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 24px; }
+    .rbw-cat-card { border: 2px solid var(--rbw-border); border-radius: 14px; padding: 36px 16px; cursor: pointer; text-align: center; transition: all .2s; background: var(--rbw-panel); }
+    .rbw-cat-card:hover { border-color: var(--rbw-primary); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.07); }
+    .rbw-cat-card.on { border-color: var(--rbw-primary); background: var(--rbw-primary-lt); }
+    .rbw-cat-icon { font-size: 40px; margin-bottom: 12px; line-height: 1; }
+    .rbw-cat-label { font-size: 17px; font-weight: 700; }
+    .rbw-cat-desc { font-size: 12px; color: var(--rbw-muted); margin-top: 4px; }
+
+    /* Intent step */
+    .rbw-intent-banner {
+      background: linear-gradient(135deg, var(--rbw-purple) 0%, #2d1f6b 100%);
+      border-radius: var(--rbw-radius); padding: 16px 18px; margin-bottom: 20px; color: #fff;
+      display: flex; align-items: center; gap: 14px;
+    }
+    .rbw-intent-banner-icon {
+      width: 42px; height: 42px; border-radius: 50%; background: rgba(255,255,255,.15);
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .rbw-intent-banner-icon svg { width: 20px; height: 20px; }
+    .rbw-intent-banner-text { flex: 1; }
+    .rbw-intent-banner-title { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+    .rbw-intent-banner-sub { font-size: 12px; opacity: 0.8; }
+    .rbw-intent-banner-btn {
+      background: var(--rbw-primary); color: #fff; border: none; border-radius: 8px;
+      padding: 8px 14px; font-family: var(--rbw-font); font-size: 12px; font-weight: 700;
+      cursor: pointer; white-space: nowrap; flex-shrink: 0; transition: background .15s;
+    }
+    .rbw-intent-banner-btn:hover { background: var(--rbw-primary-dk); }
+    .rbw-intent-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+    .rbw-intent-card {
+      border: 2px solid var(--rbw-border); border-radius: 14px;
+      padding: 20px 16px 18px; cursor: pointer; transition: all .2s;
+      background: var(--rbw-panel); display: flex; flex-direction: column; align-items: flex-start;
+    }
+    .rbw-intent-card:hover { border-color: var(--rbw-purple); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+    .rbw-intent-card.full-width { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 14px; padding: 16px 18px; }
+    .rbw-intent-icon {
+      width: 40px; height: 40px; border-radius: 10px; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 12px; flex-shrink: 0; color: var(--rbw-purple);
+    }
+    .rbw-intent-card.full-width .rbw-intent-icon { margin-bottom: 0; }
+    .rbw-intent-icon svg { width: 20px; height: 20px; }
+    .rbw-intent-label { font-size: 14px; font-weight: 700; color: var(--rbw-text); margin-bottom: 4px; }
+    .rbw-intent-desc { font-size: 12px; color: var(--rbw-muted); line-height: 1.4; }
+    .rbw-intent-acu { margin-top: 4px; text-align: center; }
+    .rbw-intent-acu-link {
+      font-size: 13px; color: var(--rbw-muted); background: none; border: none;
+      cursor: pointer; font-family: var(--rbw-font); text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .rbw-intent-acu-link:hover { color: var(--rbw-purple); }
+
+    /* Therapist pick step */
+    .rbw-tx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .rbw-tx-pick-card {
+      border: 2px solid var(--rbw-border); border-radius: 14px;
+      padding: 16px 14px 14px; cursor: pointer; transition: all .2s;
+      background: var(--rbw-panel); display: flex; flex-direction: column; align-items: center; text-align: center;
+    }
+    .rbw-tx-pick-card:hover { border-color: var(--rbw-purple); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+    .rbw-tx-pick-card.on { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
+    .rbw-tx-pick-photo {
+      width: 64px; height: 64px; border-radius: 50%;
+      background: var(--rbw-purple-lt); color: var(--rbw-purple);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px; font-weight: 700; flex-shrink: 0; overflow: hidden;
+      margin-bottom: 10px; border: 3px solid transparent; transition: border-color .18s;
+    }
+    .rbw-tx-pick-card.on .rbw-tx-pick-photo { border-color: var(--rbw-purple); }
+    .rbw-tx-pick-photo img { width: 100%; height: 100%; object-fit: cover; }
+    .rbw-tx-pick-name { font-size: 13px; font-weight: 700; margin-bottom: 3px; color: var(--rbw-text); }
+    .rbw-tx-pick-spec { font-size: 11px; color: var(--rbw-muted); line-height: 1.4; }
+    .rbw-tx-any-card {
+      border: 2px dashed var(--rbw-border); border-radius: 14px;
+      padding: 16px 14px; cursor: pointer; transition: all .2s;
+      background: var(--rbw-panel); display: flex; align-items: center; gap: 14px;
+      margin-bottom: 16px;
+    }
+    .rbw-tx-any-card:hover { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
+    .rbw-tx-any-icon {
+      width: 48px; height: 48px; border-radius: 50%; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--rbw-purple);
+    }
+    .rbw-tx-any-icon svg { width: 22px; height: 22px; }
+    .rbw-slot-badge {
+      background: var(--rbw-primary); color: #fff;
+      font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+      padding: 2px 6px; border-radius: 20px; margin-left: 6px; vertical-align: middle;
+    }
+
+    /* Appointment summary bar */
+    .rbw-appt-summary {
+      background: var(--rbw-purple-lt); border: 1px solid rgba(65,47,131,.15);
+      border-radius: 10px; padding: 12px 14px; margin-bottom: 20px;
+    }
+    .rbw-appt-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      font-size: 13px; padding: 3px 0; gap: 8px;
+    }
+    .rbw-appt-row span:first-child { color: var(--rbw-muted); flex: 1; }
+    .rbw-appt-row span:last-child { font-weight: 600; white-space: nowrap; }
+    .rbw-appt-row.rbw-appt-total {
+      border-top: 1px solid rgba(65,47,131,.2); margin-top: 8px; padding-top: 8px;
+      font-weight: 700;
+    }
+    .rbw-appt-row.rbw-appt-total span { color: var(--rbw-purple); font-size: 14px; }
+
+    @media (max-width: 480px) {
+      #rbw-panel {
+        width: 100vw;
+        top: 0; left: 0; right: 0; bottom: 0;
+        height: 100vh;
+        height: 100dvh;
+        border-radius: 0;
+        max-width: 100vw;
+      }
+      #rbw-body { padding-bottom: 200px; }
+    }
+  `;
+
+  // ─── SVG Icons ─────────────────────────────────────────────────────────────
+  const I = {
+    back:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>`,
+    close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+    check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`,
+    arrow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>`,
+    cal:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`,
+    clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
+    user:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+    pin:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>`,
+    spa:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 22s8-6 8-12a8 8 0 0 0-16 0c0 6 8 12 8 12z"/><path d="M12 14a4 4 0 0 0 4-4"/><path d="M12 14a4 4 0 0 1-4-4"/></svg>`,
+    plus:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+  };
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+  function fmt(n) { return '$' + Number(n).toFixed(0); }
+
+  function fmtDate(d) {
+    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  }
+
+  function fmtMonth(d) {
+    return d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  }
+
+  function initials(first, last) {
+    return ((first || '')[0] + (last || '')[0]).toUpperCase();
+  }
+
+  function buildAvatar(name, photoUrl, cssClass) {
+    const el = document.createElement('div');
+    el.className = cssClass;
+    if (photoUrl) {
+      const img = document.createElement('img');
+      img.src = photoUrl;
+      img.alt = name || '';
+      el.appendChild(img);
+    } else {
+      el.textContent = (name || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+    }
+    return el;
+  }
+
+  // ─── Panel control ─────────────────────────────────────────────────────────
+  function openPanel() {
+    state = freshState();
+    const overlay = document.getElementById('rbw-overlay');
+    const panel   = document.getElementById('rbw-panel');
+    overlay.style.display = 'block';
+    requestAnimationFrame(() => {
+      overlay.classList.add('rbw-show');
+      panel.classList.add('rbw-open');
+    });
+    document.body.style.overflow = 'hidden';
+    goTo(S.INTENT);
+  }
+
+  function closePanel() {
+    document.getElementById('rbw-overlay').classList.remove('rbw-show');
+    document.getElementById('rbw-panel').classList.remove('rbw-open');
+    document.body.style.overflow = '';
+    setTimeout(() => { document.getElementById('rbw-overlay').style.display = 'none'; }, 350);
+  }
+
+  // Avatar helpers — initials + deterministic brand color since photos are null
+  const AVATAR_PALETTE = ['#412F83','#6B4FA0','#5B4FCF','#8B5CF6','#7C3AED','#9333EA'];
+  function avatarColor(id) { return AVATAR_PALETTE[Math.abs(id) % AVATAR_PALETTE.length]; }
+  function initials(name) { return (name || '').split(' ').filter(Boolean).map(w => w[0]).join('').slice(0, 2).toUpperCase(); }
+
+  function goBack() {
+    let target = BACK_TO[state.step];
+    // If addons were skipped (no addons or all filtered), skip back past them too
+    if (target === S.ADDONS && state._skippedAddons) target = S.DURATION;
+    // On therapist path, DURATION back goes to THERAPIST_PICK
+    if (target === S.INTENT && state.step === S.DURATION && state.path === 'therapist') target = S.THERAPIST_PICK;
+    if (target) goTo(target);
+  }
+
+  function goTo(step) {
+    state.step = step;
+
+    const backBtn = document.getElementById('rbw-back-btn');
+    if (backBtn) backBtn.style.visibility = BACK_TO[step] ? 'visible' : 'hidden';
+
+    const prog = document.getElementById('rbw-prog-fill');
+    if (prog) prog.style.width = (PROGRESS[step] || 0) + '%';
+
+    const body = document.getElementById('rbw-body');
+    if (body) { body.scrollTop = 0; body.innerHTML = ''; }
+
+    render(step);
+  }
+
+  // ─── Router ────────────────────────────────────────────────────────────────
+  function render(step) {
+    switch (step) {
+      case S.INTENT:         renderIntent();        break;
+      case S.CATEGORY:       renderCategory();      break;
+      case S.DURATION:       renderDuration();      break;
+      case S.ADDONS:         renderAddons();        break;
+      case S.THERAPIST_PICK: renderTherapistPick(); break;
+      case S.THERAPIST:      renderTherapist();     break;
+      case S.CALENDAR:       renderCalendar();      break;
+      case S.REVIEW:         renderReview();        break;
+      case S.AUTH:           renderAuth();          break;
+      case S.CHECKOUT:       renderCheckout();      break;
+      case S.CONFIRMATION:   renderConfirmation();  break;
+    }
+  }
+
+  // ─── Step 0: Intent — how do you want to book? ───────────────────────────
+  function renderIntent() {
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = '';
+
+    const title = document.createElement('h2');
+    title.className = 'rbw-title';
+    title.textContent = 'Welcome to Revive Bodywork';
+    body.appendChild(title);
+
+    const sub = document.createElement('p');
+    sub.className = 'rbw-subtitle';
+    sub.textContent = 'How would you like to book?';
+    body.appendChild(sub);
+
+    // First-visit banner — shown only when no prior visit recorded in localStorage
+    const isFirstVisit = !localStorage.getItem('rbw_visited');
+    if (isFirstVisit) {
+      const banner = document.createElement('div');
+      banner.className = 'rbw-intent-banner';
+      banner.innerHTML = `
+        <div class="rbw-intent-banner-icon">${SVG('<path d="M10 2c0 0-6 4-6 8a6 6 0 0 0 12 0c0-4-6-8-6-8Z"/><circle cx="10" cy="10" r="2" fill="currentColor" stroke="none"/>')}</div>
+        <div class="rbw-intent-banner-text">
+          <div class="rbw-intent-banner-title">First visit? Welcome!</div>
+          <div class="rbw-intent-banner-sub">New clients get 20% off their first session.</div>
+        </div>
+        <button class="rbw-intent-banner-btn" id="rbw-intro-shortcut">Claim Offer →</button>
+      `;
+      body.appendChild(banner);
+
+      banner.querySelector('#rbw-intro-shortcut').onclick = async () => {
+        const btn = banner.querySelector('#rbw-intro-shortcut');
+        btn.disabled = true; btn.textContent = 'Loading…';
+        try {
+          if (!state._boardsCache) state._boardsCache = await authGet('/boards');
+          const introBoard = state._boardsCache.find(b => b.name.toLowerCase().includes('intro'));
+          if (introBoard && introBoard.services[0]) {
+            const svc = introBoard.services[0];
+            state.path           = 'service';
+            state.category       = 'massage';
+            state.board          = { id: introBoard.id, name: introBoard.name };
+            state.service        = svc;
+            state.duration       = svc.minDurationInMinutes;
+            state.selectedAddons = [];
+            state._staffCache    = null;
+            goTo(S.ADDONS);
+          }
+        } catch { btn.disabled = false; btn.textContent = 'Claim Offer →'; }
+      };
+    }
+
+    // Three intent cards
+    const grid = document.createElement('div');
+    grid.className = 'rbw-intent-grid';
+
+    const paths = [
+      {
+        key: 'service',
+        icon: SVG('<path d="M2 6Q6 3 10 6Q14 9 18 6"/><path d="M2 11Q6 8 10 11Q14 14 18 11"/><path d="M2 16Q6 13 10 16Q14 19 18 16"/>'),
+        label: 'By Service',
+        desc: 'Browse massages, specialty treatments, and intro offers.',
+      },
+      {
+        key: 'therapist',
+        icon: SVG('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+        label: 'By Therapist',
+        desc: 'Pick your favorite therapist, then find a time that works.',
+      },
+    ];
+
+    paths.forEach(({ key, icon, label, desc }) => {
+      const card = document.createElement('div');
+      card.className = 'rbw-intent-card';
+      card.innerHTML = `
+        <div class="rbw-intent-icon">${icon}</div>
+        <div class="rbw-intent-label">${label}</div>
+        <div class="rbw-intent-desc">${desc}</div>
+      `;
+      card.onclick = () => {
+        state.path     = key;
+        state.category = 'massage';
+        if (key === 'therapist') {
+          goTo(S.THERAPIST_PICK);
+        } else {
+          goTo(S.DURATION);
+        }
+      };
+      grid.appendChild(card);
+    });
+
+    // "By Time" as full-width third card
+    const timeCard = document.createElement('div');
+    timeCard.className = 'rbw-intent-card full-width';
+    timeCard.innerHTML = `
+      <div class="rbw-intent-icon">${SVG('<circle cx="10" cy="10" r="8"/><polyline points="10 5 10 10 14 12"/>')}</div>
+      <div>
+        <div class="rbw-intent-label">By Available Time</div>
+        <div class="rbw-intent-desc">See all open slots across all therapists — we'll highlight the best ones.</div>
+      </div>
+    `;
+    timeCard.onclick = () => {
+      state.path     = 'time';
+      state.category = 'massage';
+      goTo(S.DURATION);
+    };
+    grid.appendChild(timeCard);
+
+    body.appendChild(grid);
+
+    // Acupuncture link
+    const acuWrap = document.createElement('div');
+    acuWrap.className = 'rbw-intent-acu';
+    const acuLink = document.createElement('button');
+    acuLink.className = 'rbw-intent-acu-link';
+    acuLink.textContent = 'Booking acupuncture? Click here →';
+    acuLink.onclick = () => {
+      state.path     = 'service';
+      state.category = 'acupuncture';
+      goTo(S.DURATION);
+    };
+    acuWrap.appendChild(acuLink);
+    body.appendChild(acuWrap);
+  }
+
+  // ─── Step 0b: Category (legacy, kept for direct acupuncture path) ─────────
+  function renderCategory() {
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = '';
+
+    const title = document.createElement('h2');
+    title.className = 'rbw-title';
+    title.textContent = 'Welcome to Revive Bodywork';
+    body.appendChild(title);
+
+    const sub = document.createElement('p');
+    sub.className = 'rbw-subtitle';
+    sub.textContent = 'What type of session are you booking?';
+    body.appendChild(sub);
+
+    const grid = document.createElement('div');
+    grid.className = 'rbw-cat-grid';
+
+    [
+      { key: 'massage',      emoji: '🫴', label: 'Massage',      desc: 'Relaxation, deep tissue & more' },
+      { key: 'acupuncture',  emoji: '🌿', label: 'Acupuncture',  desc: 'Traditional needle therapy' },
+    ].forEach(({ key, emoji, label, desc }) => {
+      const card = document.createElement('div');
+      card.className = 'rbw-cat-card' + (state.category === key ? ' on' : '');
+      card.innerHTML = `
+        <div class="rbw-cat-icon">${emoji}</div>
+        <div class="rbw-cat-label">${label}</div>
+        <div class="rbw-cat-desc">${desc}</div>
+      `;
+      card.onclick = () => {
+        if (state.category !== key) {
+          state.category = key;
+          state.duration = null;
+          state.board = null;
+          state.service = null;
+          state.selectedAddons = [];
+          state._staffCache = null;
+        }
+        goTo(S.DURATION);
+      };
+      grid.appendChild(card);
+    });
+
+    body.appendChild(grid);
+  }
+
+  // ─── Step 1: Duration + Service (combined) ────────────────────────────────
+  function renderDuration() {
+    const body = document.getElementById('rbw-body');
+    const isAcu = state.category === 'acupuncture';
+    body.innerHTML = '';
+
+    const title = document.createElement('h2');
+    title.className = 'rbw-title';
+    title.textContent = isAcu ? 'Choose your service' : 'Book your session';
+    body.appendChild(title);
+
+    const sub = document.createElement('p');
+    sub.className = 'rbw-subtitle';
+    sub.textContent = isAcu
+      ? 'Select an acupuncture appointment'
+      : 'Choose a length, then pick your service';
+    body.appendChild(sub);
+
+    // Therapist context bar — shown when coming from the "By Therapist" path
+    if (state.path === 'therapist' && state.staffName) {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'display:flex;align-items:center;gap:10px;background:var(--rbw-purple-lt);border:1px solid rgba(65,47,131,.15);border-radius:10px;padding:10px 14px;margin-bottom:18px;';
+      const av = buildAvatar(state.staffName, state.staffPhoto, 'rbw-tx-chip-avatar');
+      av.style.cssText = 'width:36px;height:36px;border-radius:50%;flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;';
+      if (!state.staffPhoto) {
+        av.style.background = avatarColor(state.staffId);
+        av.style.color = '#fff';
+      }
+      const info = document.createElement('div');
+      info.innerHTML = `<div style="font-size:12px;color:var(--rbw-muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em;">Booking with</div><div style="font-size:13px;font-weight:700;color:var(--rbw-purple);">${state.staffName}</div>`;
+      bar.appendChild(av);
+      bar.appendChild(info);
+      body.appendChild(bar);
+    }
+
+    if (!isAcu) {
+      // Featured Intro Offers shortcut — bypasses duration picker
+      const introBtn = document.createElement('button');
+      introBtn.className = 'rbw-intro-btn';
+      introBtn.innerHTML = `
+        <div class="rbw-intro-btn-left">
+          <div class="rbw-intro-btn-label">First visit?</div>
+          <div class="rbw-intro-btn-title">Intro Offers &mdash; 20% Off</div>
+        </div>
+        <div class="rbw-intro-btn-arrow">→</div>
+      `;
+      introBtn.onclick = async () => {
+        introBtn.disabled = true;
+        introBtn.style.opacity = '0.7';
+        try {
+          if (!state._boardsCache) state._boardsCache = await authGet('/boards');
+          const introBoard = state._boardsCache.find(b => b.name.toLowerCase().includes('intro'));
+          if (introBoard && introBoard.services[0]) {
+            const svc = introBoard.services[0];
+            state.board          = { id: introBoard.id, name: introBoard.name };
+            state.service        = svc;
+            state.duration       = svc.minDurationInMinutes;
+            state.selectedAddons = [];
+            state._staffCache    = null;
+            goTo(S.ADDONS);
+          }
+        } catch { introBtn.disabled = false; introBtn.style.opacity = '1'; }
+      };
+      body.appendChild(introBtn);
+
+      const durLbl = document.createElement('div');
+      durLbl.className = 'rbw-lbl';
+      durLbl.textContent = 'Session Length';
+      body.appendChild(durLbl);
+
+      const grid = document.createElement('div');
+      grid.className = 'rbw-dur-grid';
+      grid.style.marginBottom = '24px';
+
+      [
+        { minutes: 30,  label: '30 min' },
+        { minutes: 60,  label: '60 min' },
+        { minutes: 90,  label: '90 min' },
+        { minutes: 120, label: '120 min' },
+      ].forEach(({ minutes, label }) => {
+        const card = document.createElement('div');
+        card.className = 'rbw-dur-card' + (state.duration === minutes ? ' on' : '');
+        const timeEl = document.createElement('div');
+        timeEl.className = 'rbw-dur-time';
+        timeEl.textContent = label;
+        const priceEl = document.createElement('div');
+        priceEl.className = 'rbw-dur-price';
+        priceEl.textContent = fmt(PRICES[minutes]);
+        card.appendChild(timeEl);
+        card.appendChild(priceEl);
+        card.onclick = () => {
+          const changed = state.duration !== minutes;
+          state.duration = minutes;
+          if (changed) {
+            state.board = null;
+            state.service = null;
+            state.selectedAddons = [];
+            state._staffCache = null;
+          }
+          grid.querySelectorAll('.rbw-dur-card').forEach(c => c.classList.remove('on'));
+          card.classList.add('on');
+          loadServices();
+        };
+        grid.appendChild(card);
+      });
+
+      body.appendChild(grid);
+    }
+
+    const svcSection = document.createElement('div');
+    svcSection.id = 'rbw-svc-section';
+    body.appendChild(svcSection);
+
+    if (state.duration || isAcu) loadServices();
+  }
+
+  // Keyword → SVG icon mapping for service tiles (stroke-based, currentColor = brand purple)
+  const SVG = (path, extra = '') =>
+    `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" ${extra}>${path}</svg>`;
+
+  const SERVICE_ICONS = [
+    // Three flowing wavy lines — massage strokes
+    { keys: ['signature', 'deep tissue', 'swedish', 'relaxation'],
+      icon: SVG('<path d="M2 6Q6 3 10 6Q14 9 18 6"/><path d="M2 11Q6 8 10 11Q14 14 18 11"/><path d="M2 16Q6 13 10 16Q14 19 18 16"/>') },
+
+    // Footprint — heel ellipse + three toe dots
+    { keys: ['ashiatsu', 'barefoot'],
+      icon: SVG('<ellipse cx="10" cy="14.5" rx="4.5" ry="3.5"/><circle cx="7.5" cy="9.5" r="1" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="12.5" cy="9.5" r="1" fill="currentColor" stroke="none"/>') },
+
+    // Two overlapping rings — partnership
+    { keys: ['couples', 'partner', 'duo'],
+      icon: SVG('<circle cx="7.5" cy="10" r="4"/><circle cx="12.5" cy="10" r="4"/>') },
+
+    // Four-petal lotus — new beginnings / first visit
+    { keys: ['intro', 'first time', 'new client'],
+      icon: SVG('<path d="M10 16C10 16 5 13 5 8.5C5 6 7 4.5 10 7C13 4.5 15 6 15 8.5C15 13 10 16 10 16Z"/><path d="M10 7V16" stroke-width="1"/>') },
+
+    // Water drop — lymph / flow
+    { keys: ['lymphatic', 'drainage'],
+      icon: SVG('<path d="M10 3L15.5 12A5.5 5.5 0 0 1 4.5 12Z"/>') },
+
+    // Crescent moon — gentle / prenatal
+    { keys: ['prenatal', 'pregnancy', 'maternity'],
+      icon: SVG('<path d="M14 4A7 7 0 1 0 14 16A5 5 0 0 1 14 4Z" fill="none"/>') },
+
+    // Three stacked stones — hot stone massage
+    { keys: ['hot stone', 'stone'],
+      icon: SVG('<ellipse cx="10" cy="15" rx="6" ry="2.2"/><ellipse cx="10" cy="11" rx="4.5" ry="1.9"/><ellipse cx="10" cy="7.5" rx="3" ry="1.6"/>') },
+
+    // Lightning bolt — energy / sport
+    { keys: ['sport', 'athletic', 'recovery'],
+      icon: SVG('<path d="M12 2L6 11H10L8 18L14 9H10L12 2Z"/>') },
+
+    // Three fine vertical lines — acupuncture needles
+    { keys: ['acupuncture', 'needle'],
+      icon: SVG('<line x1="7" y1="3" x2="7" y2="17"/><line x1="10" y1="2" x2="10" y2="16"/><line x1="13" y1="3" x2="13" y2="17"/><circle cx="7" cy="3" r="1" fill="currentColor" stroke="none"/><circle cx="10" cy="2" r="1" fill="currentColor" stroke="none"/><circle cx="13" cy="3" r="1" fill="currentColor" stroke="none"/>') },
+
+    // Radiating circle — visceral / energy work
+    { keys: ['visceral', 'manipulation', 'cranio'],
+      icon: SVG('<circle cx="10" cy="10" r="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/>') },
+
+    // Cup shape — cupping therapy
+    { keys: ['cupping'],
+      icon: SVG('<path d="M6 7H14L13 14H7L6 7Z"/><path d="M5 7Q10 4 15 7"/><line x1="10" y1="14" x2="10" y2="17"/>') },
+  ];
+
+  // Fallback short descriptions for boards that don't return one from the API
+  const SERVICE_DESCS = [
+    { keys: ['signature', 'deep tissue'],   desc: 'Targeted pressure for deep tension relief.' },
+    { keys: ['ashiatsu', 'barefoot'],        desc: 'Deepest pressure possible via bar-supported barefoot technique.' },
+    { keys: ['couples'],                     desc: 'Side-by-side session — perfect for partners or friends.' },
+    { keys: ['intro', 'first time'],         desc: 'First visit? Start here for the best intro price.' },
+    { keys: ['prenatal', 'pregnancy'],       desc: 'Safe, nurturing support for pregnancy comfort.' },
+    { keys: ['hot stone'],                   desc: 'Heated stones melt away tension for whole-body relaxation.' },
+    { keys: ['lymphatic'],                   desc: 'Stimulates lymph flow and supports your body\'s detox system.' },
+    { keys: ['sport', 'athletic'],           desc: 'Designed for active bodies — faster recovery, less soreness.' },
+    { keys: ['acupuncture'],                 desc: 'Fine needles restore balance and relieve pain naturally.' },
+  ];
+
+  async function loadServices() {
+    const section = document.getElementById('rbw-svc-section');
+    if (!section) return;
+
+    const isAcu = state.category === 'acupuncture';
+
+    const lbl = document.createElement('div');
+    lbl.className = 'rbw-lbl';
+    lbl.textContent = isAcu ? 'Available Services' : 'Service Type';
+
+    const grid = document.createElement('div');
+    grid.className = 'rbw-type-grid';
+    grid.innerHTML = `<div class="rbw-spin-wrap" style="padding:24px 0;grid-column:1/-1;"><div class="rbw-spinner"></div><span>Loading…</span></div>`;
+
+    section.innerHTML = '';
+    section.appendChild(lbl);
+    section.appendChild(grid);
+
+    try {
+      if (!state._boardsCache) {
+        state._boardsCache = await authGet('/boards');
+      }
+
+      // Split boards into standard (match selected duration) and specialty (fixed durations)
+      const STANDARD_DURATIONS = new Set([30, 60, 90, 120]);
+      const standardBoards = [], specialtyBoards = [];
+
+      state._boardsCache.forEach(board => {
+        const isAcuBoard = board.name.toLowerCase().includes('acupuncture');
+        if (isAcu !== isAcuBoard) return;
+        if (isAcu) { standardBoards.push({ board, svc: board.services[0] }); return; }
+        const svc = board.services.find(s => s.minDurationInMinutes === state.duration);
+        if (svc) { standardBoards.push({ board, svc }); return; }
+        // Specialty: has no service for the selected duration — show with its own pricing
+        const anySvc = board.services.find(s => !STANDARD_DURATIONS.has(s.minDurationInMinutes));
+        if (anySvc) specialtyBoards.push({ board, svc: anySvc, isSpecialty: true });
+      });
+
+      const makeServiceTile = ({ board, svc, isSpecialty }, idx, isPopularEligible) => {
+        const isOn = state.board?.id === board.id;
+        const card = document.createElement('div');
+        card.className = 'rbw-type-card' + (isOn ? ' on' : '');
+        const nameLow = board.name.toLowerCase();
+        const icon = SERVICE_ICONS.find(r => r.keys.some(k => nameLow.includes(k)))?.icon
+          || SVG('<circle cx="10" cy="10" r="7"/><path d="M7 10h6M10 7v6"/>');
+        const fallbackDesc = SERVICE_DESCS.find(r => r.keys.some(k => nameLow.includes(k)))?.desc || '';
+        const desc = stripHtml(svc.description || '') || fallbackDesc;
+        const isPopular = isPopularEligible && idx === 0;
+        card.innerHTML = `
+          ${isPopular ? '<div class="rbw-type-badge">Popular</div>' : ''}
+          <div class="rbw-type-icon">${icon}</div>
+          <div class="rbw-type-name">${board.name}</div>
+          ${desc ? `<div class="rbw-type-desc">${desc}</div>` : ''}
+          ${isSpecialty ? `<div class="rbw-type-meta">${svc.minDurationInMinutes} min · <strong>${fmt(svc.priceInCurrency)}</strong></div>` : ''}
+        `;
+        card.onclick = () => {
+          state.board           = { id: board.id, name: board.name };
+          state.service         = svc;
+          state.selectedAddons  = [];
+          state._staffCache     = null;
+          state._skippedAddons  = false;
+          state.duration        = svc.minDurationInMinutes;
+          goTo(S.ADDONS);
+        };
+        return card;
+      };
+
+      grid.innerHTML = '';
+      if (!standardBoards.length && !specialtyBoards.length) {
+        grid.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;grid-column:1/-1;">No services available. Please try another length.</p>`;
+        return;
+      }
+
+      standardBoards.forEach((entry, idx) => grid.appendChild(makeServiceTile(entry, idx, true)));
+
+      if (specialtyBoards.length) {
+        const specialtyLbl = document.createElement('div');
+        specialtyLbl.className = 'rbw-specialty-lbl';
+        specialtyLbl.style.gridColumn = '1 / -1';
+        specialtyLbl.textContent = 'Specialty Services';
+        grid.appendChild(specialtyLbl);
+        specialtyBoards.forEach((entry, idx) => grid.appendChild(makeServiceTile(entry, idx, false)));
+      }
+    } catch {
+      grid.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;grid-column:1/-1;">Couldn't load services. Please try again.</p>`;
+    }
+  }
+
+  // ─── Appointment summary bar ───────────────────────────────────────────────
+  function buildSummaryBar() {
+    if (!state.service) return null;
+
+    const basePrice   = parseFloat(state.service.priceInCurrency);
+    const addonsPrice = state.selectedAddons.reduce((a, b) => a + b.priceInCurrency, 0);
+    const addonsTime  = state.selectedAddons.reduce((a, b) => a + (b.durationInMinutes || 0), 0);
+    const totalPrice  = basePrice + addonsPrice;
+    const totalTime   = (state.duration || 0) + addonsTime;
+
+    const bar = document.createElement('div');
+    bar.className = 'rbw-appt-summary';
+
+    const makeRow = (label, value, cls = '') => {
+      const row = document.createElement('div');
+      row.className = 'rbw-appt-row' + (cls ? ' ' + cls : '');
+      row.innerHTML = `<span>${label}</span><span>${value}</span>`;
+      return row;
+    };
+
+    bar.appendChild(makeRow(state.service.name, `${state.duration} min · ${fmt(basePrice)}`));
+
+    state.selectedAddons.forEach(a => {
+      const timeStr = a.durationInMinutes ? ` +${a.durationInMinutes} min` : '';
+      bar.appendChild(makeRow(`+ ${a.name}`, `${timeStr} · +${fmt(a.priceInCurrency)}`));
+    });
+
+    if (state.selectedAddons.length > 0) {
+      bar.appendChild(makeRow('Total', `${totalTime} min · ${fmt(totalPrice)}`, 'rbw-appt-total'));
+    }
+
+    return bar;
+  }
+
+  // ─── Step 2: Add-ons ─────────────────────────────────────────────────────
+  // Strip HTML tags from Momence descriptions that embed raw HTML
+  function stripHtml(str) {
+    if (!str) return '';
+    return str.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Remove leading duration prefix like "30 Minute " from add-on names
+  function cleanAddonName(name) {
+    return name.replace(/^\d+\s+minute\s+/i, '').trim();
+  }
+
+  const ADDON_ICONS = [
+    { keys: ['visceral'],          icon: SVG('<circle cx="10" cy="10" r="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.5" y1="4.5" x2="6" y2="6"/><line x1="14" y1="14" x2="15.5" y2="15.5"/><line x1="15.5" y1="4.5" x2="14" y2="6"/><line x1="6" y1="14" x2="4.5" y2="15.5"/>') },
+    { keys: ['reiki'],             icon: SVG('<path d="M10 2v4M10 14v4M4 10H2M18 10h-4"/><circle cx="10" cy="10" r="3"/><path d="M5.5 5.5l2 2M12.5 12.5l2 2M14.5 5.5l-2 2M7.5 12.5l-2 2"/>') },
+    { keys: ['hand', 'foot', 'scalp', 'renewal'], icon: SVG('<path d="M8 14V8a1 1 0 0 1 2 0v3M10 11V7a1 1 0 0 1 2 0v4M12 11V8a1 1 0 0 1 2 0v5a4 4 0 0 1-8 0v-4a1 1 0 0 1 2 0v3"/>') },
+    { keys: ['cbd'],               icon: SVG('<path d="M10 3C10 3 6 6 6 10s4 7 4 7 4-3 4-7-4-7-4-7Z"/><line x1="10" y1="3" x2="10" y2="17"/>') },
+    { keys: ['cupping'],           icon: SVG('<path d="M6 7H14L13 14H7L6 7Z"/><path d="M5 7Q10 4 15 7"/><line x1="10" y1="14" x2="10" y2="17"/>') },
+  ];
+
+  async function renderAddons() {
+    const allAddons = state.service?.addons || [];
+    if (!allAddons.length) { state._skippedAddons = true; goTo(S.CALENDAR); return; }
+
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = `
+      <h2 class="rbw-title">Enhance your session</h2>
+      <p class="rbw-subtitle">Optional add-ons for your ${state.board?.name || 'session'}</p>
+      <div id="rbw-summary-bar"></div>
+      <div id="rbw-addon-grid" class="rbw-addon-grid">
+        <div class="rbw-spin-wrap" style="grid-column:1/-1;padding:24px 0;"><div class="rbw-spinner"></div><span>Loading options…</span></div>
+      </div>
+      <div class="rbw-upsell-total" id="rbw-addon-total" style="display:none">
+        <span>Add-ons total</span><span id="rbw-addon-total-val"></span>
+      </div>
+      <div class="rbw-footer">
+        <button class="rbw-btn rbw-btn-primary" id="rbw-addon-cta">Continue</button>
+        <button class="rbw-btn rbw-btn-ghost" id="rbw-addon-skip" style="margin-top:8px;">No thanks, skip</button>
+      </div>
+    `;
+
+    document.getElementById('rbw-addon-cta').onclick  = () => goTo(S.CALENDAR);
+    document.getElementById('rbw-addon-skip').onclick = () => { state.selectedAddons = []; goTo(S.CALENDAR); };
+
+    const sb = buildSummaryBar();
+    if (sb) document.getElementById('rbw-summary-bar').replaceWith(sb);
+
+    // Show all add-ons linked to this service — this matches native Momence widget behavior.
+    // Addon entity IDs don't map 1:1 to appointmentServiceIds so staff filtering at this
+    // step produces false negatives. Availability filtering happens at the calendar step.
+    const addons = allAddons;
+
+    const grid = document.getElementById('rbw-addon-grid');
+    if (!grid) return;
+
+    if (!addons.length) { state._skippedAddons = true; goTo(S.CALENDAR); return; }
+    state._skippedAddons = false;
+
+    grid.innerHTML = '';
+    addons.forEach(addon => {
+      const isOn  = state.selectedAddons.some(a => a.id === addon.id);
+      const nameLow = addon.name.toLowerCase();
+      const icon  = ADDON_ICONS.find(r => r.keys.some(k => nameLow.includes(k)))?.icon
+        || SVG('<circle cx="10" cy="10" r="6"/><line x1="10" y1="7" x2="10" y2="13"/><line x1="7" y1="10" x2="13" y2="10"/>');
+      const displayName = cleanAddonName(addon.name);
+      const dur    = addon.durationInMinutes || 0;
+      const checkSvg = SVG('<polyline points="4,10 8,14 16,6"/>', 'stroke-width="2.5"');
+
+      const card = document.createElement('div');
+      card.className = 'rbw-addon-card' + (isOn ? ' on' : '');
+      card.innerHTML = `
+        <div class="rbw-addon-check">${checkSvg}</div>
+        <div class="rbw-addon-icon">${icon}</div>
+        <div class="rbw-addon-name">${displayName}</div>
+        <div class="rbw-addon-meta">${dur ? `+${dur} min · ` : ''}<strong>+${fmt(addon.priceInCurrency)}</strong></div>
+      `;
+      card.onclick = () => {
+        const idx = state.selectedAddons.findIndex(a => a.id === addon.id);
+        if (idx >= 0) state.selectedAddons.splice(idx, 1);
+        else state.selectedAddons.push({ id: addon.id, name: addon.name, priceInCurrency: addon.priceInCurrency, durationInMinutes: dur });
+        const nowOn = state.selectedAddons.some(a => a.id === addon.id);
+        card.classList.toggle('on', nowOn);
+        updateAddonTotal();
+      };
+      grid.appendChild(card);
+    });
+
+    updateAddonTotal();
+  }
+
+  function updateAddonTotal() {
+    const totalEl = document.getElementById('rbw-addon-total');
+    const valEl   = document.getElementById('rbw-addon-total-val');
+    const ctaEl   = document.getElementById('rbw-addon-cta');
+    if (!totalEl) return;
+    const sum = state.selectedAddons.reduce((acc, a) => acc + a.priceInCurrency, 0);
+    if (sum > 0) {
+      totalEl.style.display = 'flex';
+      valEl.textContent = fmt(sum);
+      ctaEl.textContent = `Add ${state.selectedAddons.length} item${state.selectedAddons.length > 1 ? 's' : ''} & Continue`;
+    } else {
+      totalEl.style.display = 'none';
+      ctaEl.textContent = 'Continue';
+    }
+    const barEl = document.getElementById('rbw-summary-bar');
+    if (barEl) {
+      barEl.innerHTML = '';
+      const bar = buildSummaryBar();
+      if (bar) barEl.appendChild(bar);
+    }
+  }
+
+  // ─── Step 3: Therapist ────────────────────────────────────────────────────
+  async function renderTherapist() {
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = `
+      <h2 class="rbw-title">Choose your therapist</h2>
+      <p class="rbw-subtitle">${state.service?.name || 'Session'} · ${state.duration} min</p>
+      <div id="rbw-staff-list" class="rbw-tx-list">
+        <div class="rbw-spin-wrap"><div class="rbw-spinner"></div><span>Loading therapists…</span></div>
+      </div>
+    `;
+    const sb = buildSummaryBar();
+    if (sb) body.insertBefore(sb, body.querySelector('#rbw-staff-list'));
+
+    try {
+      if (!state._staffCache) {
+        state._staffCache = await authGet(`/boards/${state.board.id}/staff?serviceId=${state.service.appointmentServiceId}`);
+      }
+      const staff = state._staffCache;
+      const list  = document.getElementById('rbw-staff-list');
+      list.innerHTML = '';
+
+      // "Any Available" option
+      const anyCard = document.createElement('div');
+      anyCard.className = 'rbw-tx-card' + (!state.staffId ? ' on' : '');
+      const anyAvatar = buildAvatar('Any', null, 'rbw-tx-avatar');
+      const anyInfo = document.createElement('div');
+      anyInfo.style.flex = '1';
+      anyInfo.innerHTML = `<div class="rbw-tx-name">Any Available Therapist</div><div class="rbw-tx-spec">Best match for your time</div>`;
+      const anyCheck = document.createElement('div');
+      anyCheck.innerHTML = I.check;
+      anyCheck.style.cssText = 'flex-shrink:0;color:' + (!state.staffId ? 'var(--rbw-purple)' : 'var(--rbw-border)') + ';';
+      anyCard.appendChild(anyAvatar);
+      anyCard.appendChild(anyInfo);
+      anyCard.appendChild(anyCheck);
+      anyCard.onclick = () => { state.staffId = null; state.staffName = null; goTo(S.CALENDAR); };
+      list.appendChild(anyCard);
+
+      staff.forEach(member => {
+        const isOn = state.staffId === member.teacherId;
+        const card = document.createElement('div');
+        card.className = 'rbw-tx-card' + (isOn ? ' on' : '');
+        const avatar = buildAvatar(member.name, member.photo, 'rbw-tx-avatar');
+        const info = document.createElement('div');
+        info.style.flex = '1';
+        const nm = document.createElement('div'); nm.className = 'rbw-tx-name'; nm.textContent = member.name;
+        const sp = document.createElement('div'); sp.className = 'rbw-tx-spec'; sp.textContent = 'Licensed Massage Therapist';
+        info.appendChild(nm); info.appendChild(sp);
+        const checkEl = document.createElement('div');
+        checkEl.innerHTML = I.check;
+        checkEl.style.cssText = 'flex-shrink:0;color:' + (isOn ? 'var(--rbw-purple)' : 'var(--rbw-border)') + ';';
+        card.appendChild(avatar); card.appendChild(info); card.appendChild(checkEl);
+        card.onclick = () => { state.staffId = member.teacherId; state.staffName = member.name; goTo(S.CALENDAR); };
+        list.appendChild(card);
+      });
+    } catch {
+      const list = document.getElementById('rbw-staff-list');
+      if (list) list.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;">Couldn't load therapists. Please try again.</p>`;
+    }
+  }
+
+  // ─── Step 3b: Therapist Pick — browse therapists with real photos ─────────
+  async function renderTherapistPick() {
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = `
+      <h2 class="rbw-title">Choose your therapist</h2>
+      <p class="rbw-subtitle">Select who you'd like to work with</p>
+      <div id="rbw-tx-pick-any"></div>
+      <div class="rbw-lbl" style="margin-bottom:10px;">Our Team</div>
+      <div id="rbw-tx-pick-grid" class="rbw-tx-grid">
+        <div class="rbw-spin-wrap" style="grid-column:1/-1;padding:24px 0;"><div class="rbw-spinner"></div><span>Loading therapists…</span></div>
+      </div>
+    `;
+
+    // "Any Available" card
+    const anyWrap = document.getElementById('rbw-tx-pick-any');
+    const anyCard = document.createElement('div');
+    anyCard.className = 'rbw-tx-any-card';
+    anyCard.innerHTML = `
+      <div class="rbw-tx-any-icon">${SVG('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>')}</div>
+      <div>
+        <div class="rbw-tx-pick-name" style="text-align:left;font-size:14px;">Any Available Therapist</div>
+        <div class="rbw-tx-pick-spec" style="text-align:left;">Best availability — we'll match you</div>
+      </div>
+    `;
+    anyCard.onclick = () => {
+      state.staffId   = null;
+      state.staffName = null;
+      state.staffPhoto = null;
+      goTo(S.DURATION);
+    };
+    anyWrap.appendChild(anyCard);
+
+    try {
+      if (!state._teachersCache) {
+        state._teachersCache = await authGet('/teachers');
+      }
+      const teachers = state._teachersCache;
+      const grid = document.getElementById('rbw-tx-pick-grid');
+      if (!grid) return;
+      grid.innerHTML = '';
+
+      teachers.forEach(t => {
+        const fullName = `${t.firstName} ${t.lastName}`.trim() || 'Therapist';
+        const isOn = state.staffId === t.id;
+        const card = document.createElement('div');
+        card.className = 'rbw-tx-pick-card' + (isOn ? ' on' : '');
+
+        const photo = document.createElement('div');
+        photo.className = 'rbw-tx-pick-photo';
+        if (t.photo) {
+          const img = document.createElement('img');
+          img.src = t.photo; img.alt = fullName;
+          photo.appendChild(img);
+        } else {
+          photo.textContent = initials(fullName);
+          photo.style.background = avatarColor(t.id);
+          photo.style.color = '#fff';
+        }
+
+        const name = document.createElement('div');
+        name.className = 'rbw-tx-pick-name';
+        name.textContent = fullName;
+
+        const spec = document.createElement('div');
+        spec.className = 'rbw-tx-pick-spec';
+        spec.textContent = t.specialty || 'Licensed Massage Therapist';
+
+        card.appendChild(photo);
+        card.appendChild(name);
+        card.appendChild(spec);
+
+        card.onclick = () => {
+          state.staffId    = t.id;
+          state.staffName  = fullName;
+          state.staffPhoto = t.photo || null;
+          state._staffCache = null;
+          goTo(S.DURATION);
+        };
+        grid.appendChild(card);
+      });
+    } catch {
+      const grid = document.getElementById('rbw-tx-pick-grid');
+      if (grid) grid.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;grid-column:1/-1;">Couldn't load therapists. Please try again.</p>`;
+    }
+  }
+
+  // ─── Step 4: Calendar ────────────────────────────────────────────────────
+  function renderCalendar() {
+    const body = document.getElementById('rbw-body');
+    if (!state.selectedDate) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      state.selectedDate = today;
+    }
+    body.innerHTML = '';
+
+    // Title + summary
+    const title = document.createElement('h2');
+    title.className = 'rbw-title';
+    title.textContent = state.path === 'time' ? 'Find a time' : 'Choose your time';
+    body.appendChild(title);
+
+    const sb = buildSummaryBar();
+    if (sb) body.appendChild(sb);
+
+    // Purple first-available card (placeholder while loading)
+    const faMount = document.createElement('div');
+    faMount.id = 'rbw-first-avail-mount';
+    faMount.className = 'rbw-first-avail';
+    faMount.innerHTML = `<div class="rbw-spin-wrap" style="color:#fff"><div class="rbw-spinner" style="border-color:rgba(255,255,255,.25);border-top-color:#fff"></div><span>Finding first available…</span></div>`;
+    body.appendChild(faMount);
+
+    // Calendar
+    const calMount = document.createElement('div');
+    calMount.id = 'rbw-cal-mount';
+    body.appendChild(calMount);
+    calMount.appendChild(buildCalendar());
+
+    // Therapist chips label + row
+    const txLbl = document.createElement('div');
+    txLbl.className = 'rbw-lbl';
+    txLbl.textContent = 'Therapist';
+    body.appendChild(txLbl);
+
+    const txChips = document.createElement('div');
+    txChips.className = 'rbw-tx-chips';
+    txChips.id = 'rbw-tx-chips';
+    txChips.innerHTML = `<div class="rbw-spin-wrap" style="padding:10px 0"><div class="rbw-spinner"></div></div>`;
+    body.appendChild(txChips);
+
+    // Time slots (populated when date is clicked or first-avail loads)
+    const availSection = document.createElement('div');
+    availSection.id = 'rbw-avail-section';
+    body.appendChild(availSection);
+
+    // Footer
+    const footer = document.createElement('div');
+    footer.className = 'rbw-footer';
+    const cta = document.createElement('button');
+    cta.className = 'rbw-btn rbw-btn-primary';
+    cta.id = 'rbw-cal-cta';
+    cta.disabled = true;
+    cta.textContent = 'Continue';
+    cta.onclick = () => goTo(S.REVIEW);
+    footer.appendChild(cta);
+    body.appendChild(footer);
+
+    // Load staff → render chips → find first available
+    loadCalendarStaff();
+  }
+
+  async function loadCalendarStaff() {
+    // On time/therapist paths, we use /api/availability (cross-therapist).
+    // We still need therapist chips — load from /api/teachers if we have the cache.
+    const useSmartCalendar = state.path === 'time' || state.path === 'therapist';
+
+    if (useSmartCalendar) {
+      try {
+        if (!state._teachersCache) state._teachersCache = await authGet('/teachers');
+        const staff = state._teachersCache.map(t => ({
+          teacherId: t.id,
+          name: `${t.firstName} ${t.lastName}`.trim() || 'Therapist',
+          photo: t.photo || null,
+        }));
+        // Pre-filter to just the selected therapist if on therapist path
+        const filtered = state.path === 'therapist' && state.staffId
+          ? staff.filter(m => m.teacherId === state.staffId)
+          : staff;
+        state._staffCache = filtered;
+        renderTherapistChips(filtered);
+      } catch {
+        state._staffCache = [];
+        renderTherapistChips([]);
+      }
+      findFirstAvailable();
+      return;
+    }
+
+    // Service path: query staff for the base service only.
+    // Addon entity IDs don't map to appointmentServiceIds so we can't use them
+    // for staff intersection — availability at the calendar step handles that naturally.
+    const baseServiceId = state.service.appointmentServiceId;
+
+    try {
+      const baseStaff = await authGet(`/boards/${state.board.id}/staff?serviceId=${baseServiceId}`);
+      state._staffCache    = baseStaff;
+      state._validStaffIds = new Set(baseStaff.map(m => m.teacherId));
+
+      // Auto-select if only one therapist qualifies
+      if (baseStaff.length === 1 && !state.staffId) {
+        state.staffId    = baseStaff[0].teacherId;
+        state.staffName  = baseStaff[0].name;
+        state.staffPhoto = baseStaff[0].photo || null;
+      }
+
+      renderTherapistChips(baseStaff);
+    } catch {
+      state._staffCache    = [];
+      state._validStaffIds = null;
+      renderTherapistChips([]);
+    }
+
+    findFirstAvailable();
+  }
+
+  function renderTherapistChips(staff) {
+    const row = document.getElementById('rbw-tx-chips');
+    if (!row) return;
+    row.innerHTML = '';
+
+    const makeChip = (id, name, photo) => {
+      const chip = document.createElement('div');
+      chip.className = 'rbw-tx-chip' + (state.staffId === id ? ' on' : '');
+
+      const avatar = document.createElement('div');
+      avatar.className = 'rbw-tx-chip-avatar';
+      if (photo) {
+        const img = document.createElement('img'); img.src = photo; img.alt = name;
+        avatar.appendChild(img);
+      } else {
+        avatar.textContent = initials(name);
+        avatar.style.background = id ? avatarColor(id) : 'var(--rbw-purple-lt)';
+        avatar.style.color      = id ? '#fff'           : 'var(--rbw-purple)';
+      }
+
+      const lbl = document.createElement('div');
+      lbl.className = 'rbw-tx-chip-name';
+      lbl.textContent = id ? name.split(' ')[0] : 'Any';
+
+      chip.appendChild(avatar);
+      chip.appendChild(lbl);
+      chip.onclick = () => {
+        state.staffId      = id;
+        state.staffName    = id ? name : null;
+        state.staffPhoto   = id ? photo : null;
+        state.selectedSlot = null;
+        row.querySelectorAll('.rbw-tx-chip').forEach(c => c.classList.remove('on'));
+        chip.classList.add('on');
+        findFirstAvailable();
+        loadAvailability(state.selectedDate);
+      };
+      return chip;
+    };
+
+    row.appendChild(makeChip(null, 'Any', null));
+    staff.forEach(m => row.appendChild(makeChip(m.teacherId, m.name, m.photo)));
+  }
+
+  // Scans forward up to 14 days, updates the purple first-avail card and jumps the calendar.
+  async function findFirstAvailable() {
+    const faMount = document.getElementById('rbw-first-avail-mount');
+    if (faMount) faMount.innerHTML = `<div class="rbw-spin-wrap" style="color:#fff"><div class="rbw-spinner" style="border-color:rgba(255,255,255,.25);border-top-color:#fff"></div><span>Finding first available…</span></div>`;
+
+    const useSmartCalendar = state.path === 'time' || state.path === 'therapist';
+    const p2   = n => String(n).padStart(2, '0');
+    const fmtD = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+
+    try {
+      let firstSlotDate = null;
+      let firstSlot     = null;
+
+      if (useSmartCalendar) {
+        // Smart path: scan day-by-day hitting /api/availability until we find a slot
+        const dur = state.duration || 60;
+        for (let i = 0; i < 14; i++) {
+          const d = new Date(start); d.setDate(d.getDate() + i);
+          const dateStr = fmtD(d);
+          let qs = `/availability?date=${dateStr}&duration=${dur}`;
+          if (state.staffId) qs += `&therapistId=${state.staffId}`;
+          const data = await authGet(qs);
+          const slots = data.slots || [];
+          if (slots.length) {
+            firstSlotDate = d;
+            firstSlot = slots[0]; // already sorted by score desc
+            break;
+          }
+        }
+        if (!firstSlot) {
+          if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
+          updateCalCta(); return;
+        }
+        state.selectedDate = firstSlotDate;
+        rebuildCalendarSelection();
+        // Convert smart slot format to local slot
+        const smartLocalSlot = smartSlotToLocal(firstSlot, firstSlotDate);
+        if (faMount) { faMount.innerHTML = ''; faMount.appendChild(renderFirstAvailCard(smartLocalSlot)); }
+        // Populate day slots
+        const section = document.getElementById('rbw-avail-section');
+        if (section) await loadAvailability(firstSlotDate);
+      } else {
+        // Service path: original board-based approach
+        const boardId   = state.board?.id;
+        const serviceId = state.service?.appointmentServiceId;
+        if (!boardId || !serviceId) return;
+
+        const end = new Date(start); end.setDate(end.getDate() + 14);
+        const open = await fetchServiceAvailability(fmtD(start), fmtD(end));
+
+        if (!open.length) {
+          if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
+          updateCalCta(); return;
+        }
+
+        firstSlot = open[0];
+        const fd = new Date(firstSlot.value); fd.setHours(0, 0, 0, 0);
+        state.selectedDate = fd;
+        rebuildCalendarSelection();
+
+        const slot = toLocalSlot(firstSlot);
+        if (faMount) { faMount.innerHTML = ''; faMount.appendChild(renderFirstAvailCard(slot)); }
+
+        const dayStr  = fmtD(fd);
+        const dayRaw  = open.filter(s => s.value.startsWith(dayStr));
+        const section = document.getElementById('rbw-avail-section');
+        if (section) renderAvailability(dayRaw, section);
+      }
+    } catch {
+      if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">Couldn't load availability. Please try again.</p>`;
+    }
+  }
+
+  // Fetch available slots from the board-based endpoint for the service path.
+  // Respects a specific staffId if selected; otherwise returns all therapists' slots.
+  async function fetchServiceAvailability(from, to) {
+    const boardId   = state.board?.id;
+    const serviceId = state.service?.appointmentServiceId;
+    if (!boardId || !serviceId) return [];
+
+    let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}`;
+    if (state.staffId) qs += `&staffId=${state.staffId}`;
+
+    const data = await authGet(qs);
+    const raw  = Array.isArray(data) ? data.flat() : [];
+    return raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+  }
+
+  // Convert a slot from /api/availability format to a local slot object
+  function smartSlotToLocal(slot, date) {
+    const p2 = n => String(n).padStart(2, '0');
+    const h  = Math.floor(slot.minuteOffset / 60);
+    const m  = slot.minuteOffset % 60;
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12  = h > 12 ? h - 12 : h === 0 ? 12 : h;
+    const time = `${h12}:${p2(m)} ${ampm}`;
+    const isoValue = `${date.getFullYear()}-${p2(date.getMonth()+1)}-${p2(date.getDate())}T${p2(h)}:${p2(m)}:00`;
+    return {
+      isoValue,
+      time,
+      minuteOffset: slot.minuteOffset,
+      teacherId:    slot.therapistId   || null,
+      therapistName: slot.therapistName || null,
+      therapistPhoto: slot.therapistPhoto || null,
+      score:         slot.score         || 0,
+    };
+  }
+
+  function toLocalSlot(s) {
+    const d    = new Date(s.value);
+    const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    const cached = (state._staffCache || []).find(m => m.teacherId === s.teacherId);
+    const therapistName = cached?.name || (state.staffId === s.teacherId ? state.staffName : null);
+    return { isoValue: s.value, time, minuteOffset: d.getHours() * 60 + d.getMinutes(), teacherId: s.teacherId, therapistName };
+  }
+
+  async function loadAvailability(date) {
+    const section = document.getElementById('rbw-avail-section');
+    if (!section) return;
+
+    section.innerHTML = `<div class="rbw-spin-wrap"><div class="rbw-spinner"></div><span>Finding times…</span></div>`;
+
+    const p2 = n => String(n).padStart(2, '0');
+    const dateStr = `${date.getFullYear()}-${p2(date.getMonth() + 1)}-${p2(date.getDate())}`;
+
+    try {
+      if (state.path === 'time' || state.path === 'therapist') {
+        // Smart calendar: /api/availability returns gap-scored slots with therapist info
+        const dur = state.duration || 60;
+        let qs = `/availability?date=${dateStr}&duration=${dur}`;
+        if (state.staffId) qs += `&therapistId=${state.staffId}`;
+        const data = await authGet(qs);
+        renderSmartAvailability(data.slots || [], date, section);
+      } else {
+        // Service path: board-based availability
+        const nextDay = new Date(date); nextDay.setDate(nextDay.getDate() + 1);
+        const toStr   = `${nextDay.getFullYear()}-${p2(nextDay.getMonth() + 1)}-${p2(nextDay.getDate())}`;
+        if (!state.board?.id || !state.service?.appointmentServiceId) return;
+        const open = await fetchServiceAvailability(dateStr, toStr);
+        renderAvailability(open, section);
+      }
+    } catch {
+      section.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;">Couldn't load times. Please try again.</p>`;
+    }
+  }
+
+  // Renders smart-calendar slots (from /api/availability) with therapist cards + Recommended badge
+  function renderSmartAvailability(slots, date, section) {
+    section.innerHTML = '';
+
+    if (!slots.length) {
+      const noAvail = document.createElement('div');
+      noAvail.className = 'rbw-no-avail';
+      noAvail.innerHTML = `<p>No availability on this date.</p>`;
+      section.appendChild(noAvail);
+      updateCalCta(); return;
+    }
+
+    const orDiv = document.createElement('div');
+    orDiv.className = 'rbw-or';
+    orDiv.textContent = 'available times';
+    section.appendChild(orDiv);
+
+    const topScore = slots[0]?.score || 0;
+
+    const list = document.createElement('div');
+    list.className = 'rbw-slot-list';
+
+    slots.forEach(slot => {
+      const localSlot = smartSlotToLocal(slot, date);
+      const isOn = state.selectedSlot?.minuteOffset === localSlot.minuteOffset
+                && state.selectedSlot?.therapistId   === localSlot.teacherId;
+      const isRecommended = slot.score >= topScore && topScore > 50;
+
+      const row = document.createElement('div');
+      row.className = 'rbw-slot-row' + (isOn ? ' on' : '');
+
+      // Time + optional recommended badge
+      const timeEl = document.createElement('div');
+      timeEl.className = 'rbw-slot-time';
+      timeEl.innerHTML = localSlot.time + (isRecommended ? '<span class="rbw-slot-badge">Best</span>' : '');
+
+      // Therapist avatar + name
+      const txEl = document.createElement('div');
+      txEl.className = 'rbw-slot-tx';
+      const av = buildAvatar(slot.therapistName, slot.therapistPhoto, 'rbw-slot-avatar');
+      if (!slot.therapistPhoto && slot.therapistId) {
+        av.style.background = avatarColor(slot.therapistId);
+        av.style.color = '#fff';
+      }
+      const txName = document.createElement('div');
+      txName.className = 'rbw-slot-tx-name';
+      txName.textContent = slot.therapistName || 'Therapist';
+      txEl.appendChild(av);
+      txEl.appendChild(txName);
+
+      const check = document.createElement('div');
+      check.className = 'rbw-slot-check';
+      check.innerHTML = '✓';
+
+      row.appendChild(timeEl);
+      row.appendChild(txEl);
+      row.appendChild(check);
+
+      row.onclick = () => {
+        state.selectedSlot = localSlot;
+        state.staffId      = slot.therapistId   || state.staffId;
+        state.staffName    = slot.therapistName  || state.staffName;
+        state.staffPhoto   = slot.therapistPhoto || state.staffPhoto;
+        list.querySelectorAll('.rbw-slot-row').forEach(r => r.classList.remove('on'));
+        row.classList.add('on');
+        updateCalCta();
+      };
+
+      list.appendChild(row);
+    });
+
+    section.appendChild(list);
+    // Auto-select top slot if nothing chosen yet for this date
+    if (!state.selectedSlot || state.selectedSlot._date !== date.toDateString()) {
+      const topRow = list.querySelector('.rbw-slot-row');
+      if (topRow) topRow.click();
+    }
+    updateCalCta();
+  }
+
+  function renderAvailability(rawSlots, section) {
+    section.innerHTML = '';
+    const localSlots = rawSlots.map(toLocalSlot);
+
+    if (!localSlots.length) {
+      const noAvail = document.createElement('div');
+      noAvail.className = 'rbw-no-avail';
+      noAvail.innerHTML = `<p>No availability on this date.</p>`;
+      section.appendChild(noAvail);
+      updateCalCta();
+      return;
+    }
+
+    // "Or pick a different time" label + chips (no duplicate first-avail card here)
+    const orDiv = document.createElement('div');
+    orDiv.className = 'rbw-or';
+    orDiv.textContent = 'available times';
+    section.appendChild(orDiv);
+
+    const pickerMount = document.createElement('div');
+    section.appendChild(pickerMount);
+    renderTimePicker(localSlots, pickerMount);
+    updateCalCta();
+  }
+
+  // Renders into the purple #rbw-first-avail-mount div (not a standalone card)
+  function renderFirstAvailCard(slot) {
+    const wrap = document.createElement('div');
+    const txName  = slot.therapistName  || (state.staffId ? state.staffName : null);
+    const txId    = slot.teacherId;
+    const txPhoto = slot.therapistPhoto || (state.staffId === txId ? state.staffPhoto : null);
+
+    // Build therapist row — real photo if available
+    let avatarHtml = '';
+    if (txName) {
+      if (txPhoto) {
+        avatarHtml = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+          <div style="width:32px;height:32px;border-radius:50%;overflow:hidden;flex-shrink:0;"><img src="${txPhoto}" alt="${txName}" style="width:100%;height:100%;object-fit:cover;"/></div>
+          <span style="font-size:13px;opacity:0.9;font-weight:500;">with ${txName}</span>
+        </div>`;
+      } else {
+        const bg  = txId ? avatarColor(txId) : 'rgba(255,255,255,.2)';
+        const ini = initials(txName);
+        avatarHtml = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+          <div style="width:32px;height:32px;border-radius:50%;background:${bg};color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;">${ini}</div>
+          <span style="font-size:13px;opacity:0.9;font-weight:500;">with ${txName}</span>
+        </div>`;
+      }
+    }
+    wrap.innerHTML = `
+      <div class="rbw-first-avail-label">⚡ First Availability</div>
+      <div class="rbw-first-avail-time">${slot.time}</div>
+      <div class="rbw-first-avail-date" style="margin-bottom:${txName ? '0' : '14px'}">${fmtDate(state.selectedDate)}</div>
+      ${avatarHtml}
+      <button class="rbw-first-avail-btn" id="rbw-book-first">Book This Time →</button>
+    `;
+    wrap.querySelector('#rbw-book-first').onclick = () => {
+      state.selectedSlot = slot;
+      if (slot.teacherId)    state.staffId    = slot.teacherId;
+      if (slot.therapistName) state.staffName = slot.therapistName;
+      if (slot.therapistPhoto) state.staffPhoto = slot.therapistPhoto;
+      goTo(S.REVIEW);
+    };
+    return wrap;
+  }
+
+  // Time chip picker — therapist was selected in the prior step.
+  function renderTimePicker(slots, container) {
+    const seenOffsets = new Set();
+    const uniqueSlots = [];
+    slots.forEach(s => {
+      if (!seenOffsets.has(s.minuteOffset)) {
+        seenOffsets.add(s.minuteOffset);
+        uniqueSlots.push(s);
+      }
+    });
+    if (!uniqueSlots.length) return;
+
+    // Default to first slot if no valid selection exists
+    if (!state.selectedSlot || !seenOffsets.has(state.selectedSlot.minuteOffset)) {
+      state.selectedSlot = uniqueSlots[0];
+      updateCalCta();
+    }
+
+    const timeLbl = document.createElement('div');
+    timeLbl.className = 'rbw-lbl';
+    timeLbl.textContent = 'Available Times';
+    container.appendChild(timeLbl);
+
+    const chipsWrap = document.createElement('div');
+    chipsWrap.className = 'rbw-time-chips';
+    container.appendChild(chipsWrap);
+
+    uniqueSlots.forEach(slot => {
+      const chip = document.createElement('button');
+      chip.className = 'rbw-time-chip' + (state.selectedSlot?.minuteOffset === slot.minuteOffset ? ' on' : '');
+      chip.textContent = slot.time;
+      chip.onclick = () => {
+        state.selectedSlot = slot;
+        chipsWrap.querySelectorAll('.rbw-time-chip').forEach(c => c.classList.remove('on'));
+        chip.classList.add('on');
+        updateCalCta();
+      };
+      chipsWrap.appendChild(chip);
+    });
+  }
+
+  function buildCalendar() {
+    let viewDate = new Date(
+      (state.selectedDate || new Date()).getFullYear(),
+      (state.selectedDate || new Date()).getMonth(),
+      1
+    );
+    const wrapper = document.createElement('div');
+
+    function draw() {
+      wrapper.innerHTML = '';
+      const cal = document.createElement('div');
+      cal.className = 'rbw-cal';
+
+      const hdr = document.createElement('div');
+      hdr.className = 'rbw-cal-hdr';
+      const prev = document.createElement('button');
+      prev.className = 'rbw-cal-nav'; prev.innerHTML = '‹';
+      prev.onclick = () => { viewDate.setMonth(viewDate.getMonth() - 1); draw(); };
+      const title = document.createElement('h3');
+      title.textContent = fmtMonth(viewDate);
+      const next = document.createElement('button');
+      next.className = 'rbw-cal-nav'; next.innerHTML = '›';
+      next.onclick = () => { viewDate.setMonth(viewDate.getMonth() + 1); draw(); };
+      hdr.append(prev, title, next);
+      cal.appendChild(hdr);
+
+      const grid = document.createElement('div');
+      grid.className = 'rbw-cal-grid';
+      ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(d => {
+        const dow = document.createElement('div');
+        dow.className = 'rbw-cal-dow'; dow.textContent = d;
+        grid.appendChild(dow);
+      });
+
+      const today    = new Date(); today.setHours(0, 0, 0, 0);
+      const firstDay = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1).getDay();
+      const days     = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).getDate();
+
+      for (let i = 0; i < firstDay; i++) {
+        const w = document.createElement('div'); w.className = 'rbw-cal-wrap';
+        w.appendChild(Object.assign(document.createElement('div'), { className: 'rbw-cal-day empty' }));
+        grid.appendChild(w);
+      }
+      for (let d = 1; d <= days; d++) {
+        const date = new Date(viewDate.getFullYear(), viewDate.getMonth(), d);
+        const isPast   = date < today;
+        const isToday  = date.toDateString() === today.toDateString();
+        const isPicked = state.selectedDate && date.toDateString() === state.selectedDate.toDateString();
+        const w = document.createElement('div'); w.className = 'rbw-cal-wrap';
+        const dayEl = document.createElement('div');
+        dayEl.className = 'rbw-cal-day' + (isPast ? ' past' : '') + (isToday ? ' today' : '') + (isPicked ? ' picked' : '');
+        dayEl.textContent = d;
+        if (!isPast) {
+          dayEl.onclick = () => {
+            state.selectedDate = new Date(date);
+            state.selectedSlot = null;
+            draw();
+            loadAvailability(state.selectedDate);
+          };
+        }
+        w.appendChild(dayEl);
+        grid.appendChild(w);
+      }
+      cal.appendChild(grid);
+      wrapper.appendChild(cal);
+    }
+
+    draw();
+    return wrapper;
+  }
+
+  function rebuildCalendarSelection() {
+    const mount = document.getElementById('rbw-cal-mount');
+    if (!mount) return;
+    mount.innerHTML = '';
+    mount.appendChild(buildCalendar());
+  }
+
+  function updateCalCta() {
+    const cta = document.getElementById('rbw-cal-cta');
+    if (cta) cta.disabled = !state.selectedSlot;
+  }
+
+  // ─── Step 6: Auth ──────────────────────────────────────────────────────────
+  function renderAuth() {
+    const mode = state.authMode;
+    const body = document.getElementById('rbw-body');
+
+    body.innerHTML = `
+      <h2 class="rbw-title">${mode === 'login' ? 'Welcome back' : 'Create your account'}</h2>
+      <p class="rbw-subtitle">${mode === 'login' ? 'Sign in to complete your booking' : 'Quick and free — no birthday required'}</p>
+      <div class="rbw-tabs">
+        <button class="rbw-tab ${mode === 'login' ? 'on' : ''}" id="rbw-tab-login">Sign In</button>
+        <button class="rbw-tab ${mode === 'register' ? 'on' : ''}" id="rbw-tab-reg">Create Account</button>
+      </div>
+      <form id="rbw-auth-form"></form>
+    `;
+
+    document.getElementById('rbw-tab-login').onclick = () => { state.authMode = 'login'; renderAuth(); };
+    document.getElementById('rbw-tab-reg').onclick   = () => { state.authMode = 'register'; renderAuth(); };
+
+    const form = document.getElementById('rbw-auth-form');
+
+    if (mode === 'register') {
+      form.innerHTML += `
+        <div class="rbw-frow">
+          <div class="rbw-fgrp"><label class="rbw-flbl">First Name</label><input class="rbw-input" name="firstName" type="text" placeholder="First name" required></div>
+          <div class="rbw-fgrp"><label class="rbw-flbl">Last Name</label><input class="rbw-input" name="lastName" type="text" placeholder="Last name" required></div>
+        </div>
+      `;
+    }
+
+    form.innerHTML += `
+      <div class="rbw-fgrp"><label class="rbw-flbl">Email</label><input class="rbw-input" name="email" type="email" placeholder="you@email.com" required></div>
+      <div class="rbw-fgrp"><label class="rbw-flbl">Password</label><input class="rbw-input" name="password" type="password" placeholder="${mode === 'register' ? 'Create a password' : 'Your password'}" required></div>
+      <div id="rbw-auth-err"></div>
+      <div class="rbw-footer">
+        <button type="submit" class="rbw-btn rbw-btn-primary">${mode === 'login' ? 'Sign In' : 'Create Account'}</button>
+      </div>
+    `;
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const data   = Object.fromEntries(new FormData(form));
+      const errDiv = document.getElementById('rbw-auth-err');
+      const btn    = form.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      btn.textContent = mode === 'login' ? 'Signing in…' : 'Creating account…';
+      errDiv.innerHTML = '';
+
+      try {
+        const path = mode === 'login' ? '/auth/login' : '/auth/register';
+        const res  = await proxyPost(path, data);
+        state.token = res.accessToken;
+        await onAuthSuccess();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = mode === 'login' ? 'Sign In' : 'Create Account';
+        errDiv.innerHTML = `<div class="rbw-alert rbw-err">${err.message}</div>`;
+      }
+    };
+  }
+
+  // After a successful login or register, pre-fetch member data in parallel
+  // so the checkout step can render immediately without a second loading screen.
+  async function onAuthSuccess() {
+    const [pmRes, mbRes, profileRes] = await Promise.allSettled([
+      authGet('/payment-methods'),
+      authGet('/memberships/active'),
+      authGet('/member/profile'),
+    ]);
+
+    if (pmRes.status === 'fulfilled') {
+      const d = pmRes.value;
+      state.savedPaymentMethods = d?.paymentMethods || d?.data || (Array.isArray(d) ? d : []);
+    }
+    if (mbRes.status === 'fulfilled') {
+      const d = mbRes.value;
+      state.activeMemberships = d?.boughtMemberships || d?.content || d?.data || (Array.isArray(d) ? d : []);
+    }
+    if (profileRes.status === 'fulfilled') {
+      state.memberProfile = profileRes.value;
+    }
+
+    // Auto-select the first saved card if available
+    if (state.savedPaymentMethods.length > 0 && !state.selectedPmId) {
+      state.selectedPmId = state.savedPaymentMethods[0].id;
+    }
+
+    goTo(S.CHECKOUT);
+  }
+
+  // ─── Step 5: Review ──────────────────────────────────────────────────────
+  function renderReview() {
+    const body = document.getElementById('rbw-body');
+    const basePrice   = state.service ? parseFloat(state.service.priceInCurrency) : 0;
+    const addonsTotal = state.selectedAddons.reduce((acc, a) => acc + a.priceInCurrency, 0);
+    const subtotal    = basePrice + addonsTotal;
+    const effectiveTotal = state.promoCode ? state.promoCode.final : subtotal;
+
+    body.innerHTML = '';
+
+    const title = document.createElement('h2');
+    title.className = 'rbw-title';
+    title.textContent = 'Review your booking';
+    body.appendChild(title);
+
+    const sub = document.createElement('p');
+    sub.className = 'rbw-subtitle';
+    sub.textContent = 'Confirm the details below';
+    body.appendChild(sub);
+
+    // ── Summary card ────────────────────────────────────────────────────────
+    const summary = document.createElement('div');
+    summary.className = 'rbw-summary';
+
+    function makeRow(label, value) {
+      const row = document.createElement('div');
+      row.className = 'rbw-sum-row';
+      const lbl = document.createElement('span');
+      lbl.className = 'rbw-sum-lbl';
+      lbl.textContent = label;
+      const val = document.createElement('span');
+      val.textContent = value;
+      row.appendChild(lbl);
+      row.appendChild(val);
+      return row;
+    }
+
+    const hdr = document.createElement('div');
+    hdr.className = 'rbw-sum-hdr';
+    hdr.textContent = 'Booking Summary';
+    summary.appendChild(hdr);
+
+    summary.appendChild(makeRow('Service', state.service?.name || 'Session'));
+    summary.appendChild(makeRow('Duration', state.duration + ' min'));
+
+    if (state.staffName) {
+      summary.appendChild(makeRow('Therapist', state.staffName));
+    } else {
+      summary.appendChild(makeRow('Therapist', 'Any Available'));
+    }
+
+    const dateTimeStr = state.selectedDate
+      ? fmtDate(state.selectedDate) + ' at ' + (state.selectedSlot?.time || '—')
+      : '—';
+    summary.appendChild(makeRow('Date & Time', dateTimeStr));
+    summary.appendChild(makeRow('Session', fmt(basePrice)));
+
+    state.selectedAddons.forEach(a => {
+      summary.appendChild(makeRow('+ ' + a.name, fmt(a.priceInCurrency)));
+    });
+
+    // Total row — shows strikethrough + discounted if promo applied
+    const totalRow = document.createElement('div');
+    totalRow.className = 'rbw-sum-row total';
+    totalRow.id = 'rbw-total-row';
+    const totalLbl = document.createElement('span');
+    totalLbl.className = 'rbw-sum-lbl';
+    totalLbl.textContent = 'Total';
+    totalRow.appendChild(totalLbl);
+    const totalVal = document.createElement('span');
+    totalVal.id = 'rbw-total-val';
+    if (state.promoCode) {
+      totalVal.innerHTML = `<span style="text-decoration:line-through;color:var(--rbw-muted);font-weight:400;margin-right:8px;">${fmt(subtotal)}</span><span style="color:#16a34a;">${fmt(state.promoCode.final)}</span>`;
+    } else {
+      totalVal.textContent = fmt(subtotal);
+    }
+    totalRow.appendChild(totalVal);
+    summary.appendChild(totalRow);
+
+    body.appendChild(summary);
+
+    // ── Footer (promo section + auth/continue buttons) ──────────────────────
+    // Promo lives inside the footer so it's always visible above the action buttons
+    // regardless of body scroll position.
+    const footer = document.createElement('div');
+    footer.className = 'rbw-footer';
+    footer.id = 'rbw-review-footer';
+    footer.appendChild(buildPromoSection(subtotal, effectiveTotal));
+    body.appendChild(footer);
+
+    if (state.token) {
+      const btn = document.createElement('button');
+      btn.className = 'rbw-btn rbw-btn-primary';
+      btn.textContent = 'Proceed to Payment';
+      btn.onclick = async () => {
+        // Ensure payment methods are loaded when skipping auth (return visit)
+        if (!state.savedPaymentMethods.length && !state.activeMemberships.length) {
+          btn.disabled = true;
+          btn.textContent = 'Loading…';
+          await onAuthSuccess().catch(() => {});
+        } else {
+          goTo(S.CHECKOUT);
+        }
+      };
+      footer.appendChild(btn);
+    } else {
+      const login = document.createElement('button');
+      login.className = 'rbw-btn rbw-btn-primary';
+      login.textContent = 'Sign In to Continue';
+      login.onclick = () => { state.authMode = 'login'; goTo(S.AUTH); };
+      footer.appendChild(login);
+
+      const divider = document.createElement('div');
+      divider.className = 'rbw-divider';
+      divider.textContent = 'or';
+      footer.appendChild(divider);
+
+      const create = document.createElement('button');
+      create.className = 'rbw-btn rbw-btn-outline';
+      create.textContent = 'Create Free Account';
+      create.onclick = () => { state.authMode = 'register'; goTo(S.AUTH); };
+      footer.appendChild(create);
+    }
+  }
+
+  // Builds the collapsible discount code section for the review step.
+  // Rendered inside the sticky footer above the action buttons.
+  function buildPromoSection(subtotal, currentEffectiveTotal) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid var(--rbw-border);';
+
+    // Show applied badge if a code is active
+    if (state.promoCode) {
+      const badge = document.createElement('div');
+      badge.style.cssText = 'background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:8px;';
+      const badgeText = document.createElement('span');
+      badgeText.style.color = '#16a34a';
+      badgeText.innerHTML = `✓ Code <strong>${state.promoCode.code}</strong> applied — saving ${fmt(state.promoCode.discount)}`;
+      const removeBtn = document.createElement('button');
+      removeBtn.style.cssText = 'background:none;border:none;color:var(--rbw-muted);cursor:pointer;font-size:12px;font-family:var(--rbw-font);';
+      removeBtn.textContent = 'Remove';
+      removeBtn.onclick = () => {
+        state.promoCode = null;
+        // Re-render the review step to reflect removal
+        renderReview();
+      };
+      badge.appendChild(badgeText);
+      badge.appendChild(removeBtn);
+      wrap.appendChild(badge);
+      return wrap;
+    }
+
+    // Collapsible "Have a discount code?" toggle
+    const toggle = document.createElement('button');
+    toggle.style.cssText = 'background:none;border:none;color:var(--rbw-purple);font-family:var(--rbw-font);font-size:13px;font-weight:600;cursor:pointer;padding:0;text-decoration:underline;margin-bottom:10px;';
+    toggle.textContent = 'Have a discount code?';
+
+    const promoBody = document.createElement('div');
+    promoBody.style.display = 'none';
+
+    const inputRow = document.createElement('div');
+    inputRow.style.cssText = 'display:flex;gap:8px;';
+
+    const codeInput = document.createElement('input');
+    codeInput.className = 'rbw-input';
+    codeInput.type = 'text';
+    codeInput.placeholder = 'Enter code';
+    codeInput.style.flex = '1';
+    codeInput.style.textTransform = 'uppercase';
+    if (state._promoInputVal) codeInput.value = state._promoInputVal;
+
+    const applyBtn = document.createElement('button');
+    applyBtn.className = 'rbw-btn rbw-btn-outline';
+    applyBtn.style.cssText = 'display:inline-block;width:auto;padding:9px 18px;font-size:14px;';
+    applyBtn.textContent = 'Apply';
+
+    const errEl = document.createElement('div');
+    errEl.style.marginTop = '6px';
+
+    applyBtn.onclick = async () => {
+      const code = codeInput.value.trim();
+      if (!code) return;
+      state._promoInputVal = code;
+      applyBtn.disabled = true;
+      applyBtn.textContent = '…';
+      errEl.innerHTML = '';
+      try {
+        const result = await proxyPost('/promo/validate', { code, subtotal });
+        state.promoCode = { code: result.code, discount: result.discount, final: result.final };
+        state._promoInputVal = null;
+        // Re-render review to reflect applied code
+        renderReview();
+      } catch (err) {
+        applyBtn.disabled = false;
+        applyBtn.textContent = 'Apply';
+        errEl.innerHTML = `<div class="rbw-alert rbw-err">${err.message}</div>`;
+      }
+    };
+
+    inputRow.appendChild(codeInput);
+    inputRow.appendChild(applyBtn);
+    promoBody.appendChild(inputRow);
+    promoBody.appendChild(errEl);
+
+    toggle.onclick = () => {
+      const isOpen = promoBody.style.display === 'none';
+      promoBody.style.display = isOpen ? 'block' : 'none';
+      if (isOpen) codeInput.focus();
+    };
+
+    wrap.appendChild(toggle);
+    wrap.appendChild(promoBody);
+    return wrap;
+  }
+
+  // ─── Step 7: Checkout ──────────────────────────────────────────────────────
+  // Loads payment methods and memberships (already pre-fetched in onAuthSuccess,
+  // but re-fetches here to catch the case where user navigates back and forward).
+  async function renderCheckout() {
+    const body        = document.getElementById('rbw-body');
+    const basePrice   = state.service ? parseFloat(state.service.priceInCurrency) : 0;
+    const addonsTotal = state.selectedAddons.reduce((acc, a) => acc + a.priceInCurrency, 0);
+    const subtotal    = basePrice + addonsTotal;
+    const grandTotal  = state.promoCode ? state.promoCode.final : subtotal;
+
+    body.innerHTML = `
+      <h2 class="rbw-title">Confirm & Pay</h2>
+      <p class="rbw-subtitle">${fmt(grandTotal)} due today · encrypted & secure</p>
+      <div id="rbw-checkout-content">
+        <div class="rbw-spin-wrap"><div class="rbw-spinner"></div><span>Loading payment info…</span></div>
+      </div>
+      <div class="rbw-footer">
+        <button class="rbw-btn rbw-btn-primary" id="rbw-confirm-btn" disabled>
+          Confirm Booking · ${fmt(grandTotal)}
+        </button>
+        <div id="rbw-checkout-err" style="margin-top:8px;"></div>
+      </div>
+    `;
+
+    // Fetch payment methods and memberships; skip if already loaded from onAuthSuccess.
+    if (!state.savedPaymentMethods.length && !state.activeMemberships.length) try {
+      const [pmRes, mbRes] = await Promise.allSettled([
+        authGet('/payment-methods'),
+        authGet('/memberships/active'),
+      ]);
+      if (pmRes.status === 'fulfilled') {
+        const d = pmRes.value;
+        state.savedPaymentMethods = d?.paymentMethods || d?.data || (Array.isArray(d) ? d : []);
+      }
+      if (mbRes.status === 'fulfilled') {
+        const d = mbRes.value;
+        state.activeMemberships = d?.boughtMemberships || d?.content || d?.data || (Array.isArray(d) ? d : []);
+      }
+    } catch { /* use whatever was pre-fetched */ }
+
+    // Auto-select first saved card if nothing is selected yet
+    if (!state.selectedPmId && !state.selectedMbId && state.savedPaymentMethods.length > 0) {
+      state.selectedPmId = state.savedPaymentMethods[0].id;
+    }
+
+    renderCheckoutContent(grandTotal);
+  }
+
+  function renderCheckoutContent(grandTotal) {
+    const content    = document.getElementById('rbw-checkout-content');
+    const confirmBtn = document.getElementById('rbw-confirm-btn');
+    if (!content) return;
+
+    content.innerHTML = '';
+
+    // ── Membership credits section ──────────────────────────────────────────
+    // Filter to memberships that likely have usable credits (field names vary by account).
+    const usableMbs = state.activeMemberships.filter(mb =>
+      (mb.creditsRemaining ?? mb.credits ?? mb.remainingCredits ?? 1) > 0
+    );
+
+    if (usableMbs.length > 0) {
+      const section = document.createElement('div');
+      section.innerHTML = '<div class="rbw-lbl">Apply Membership Credits</div>';
+
+      usableMbs.forEach(mb => {
+        const isOn   = state.selectedMbId === mb.id;
+        const credits = mb.creditsRemaining ?? mb.credits ?? mb.remainingCredits ?? '?';
+        const card   = document.createElement('div');
+        card.className = 'rbw-pm-card' + (isOn ? ' on' : '');
+        card.innerHTML = `
+          <div class="rbw-pm-info">
+            <div class="rbw-pm-icon">🎟</div>
+            <div>
+              <div class="rbw-pm-name">${mb.name || mb.membershipName || 'Membership'}</div>
+              <div class="rbw-pm-detail">${credits} session${credits !== 1 ? 's' : ''} remaining</div>
+            </div>
+          </div>
+          ${isOn ? '<div class="rbw-pm-check">✓</div>' : ''}
+        `;
+        card.onclick = () => {
+          state.selectedMbId = mb.id;
+          state.selectedPmId = null;
+          renderCheckoutContent(grandTotal);
+        };
+        section.appendChild(card);
+      });
+
+      content.appendChild(section);
+
+      // Divider before card section
+      const divEl = document.createElement('div');
+      divEl.className = 'rbw-lbl';
+      divEl.style.marginTop = '14px';
+      divEl.textContent = 'Or pay by card';
+      content.appendChild(divEl);
+    } else {
+      const lbl = document.createElement('div');
+      lbl.className = 'rbw-lbl';
+      lbl.textContent = 'Payment Method';
+      content.appendChild(lbl);
+    }
+
+    // ── Saved card section ──────────────────────────────────────────────────
+    if (state.savedPaymentMethods.length > 0) {
+      state.savedPaymentMethods.forEach(pm => {
+        const isOn  = state.selectedPmId === pm.id;
+        const brand = (pm.brand || pm.cardBrand || pm.type || 'Card').toUpperCase();
+        const last4 = pm.last4 || pm.lastFour || '····';
+        const exp   = pm.expMonth && pm.expYear
+          ? ` · Exp ${String(pm.expMonth).padStart(2,'0')}/${String(pm.expYear).slice(-2)}`
+          : '';
+        const card  = document.createElement('div');
+        card.className = 'rbw-pm-card' + (isOn ? ' on' : '');
+        card.innerHTML = `
+          <div class="rbw-pm-info">
+            <div class="rbw-pm-icon">💳</div>
+            <div>
+              <div class="rbw-pm-name">${brand} ···${last4}</div>
+              <div class="rbw-pm-detail">Saved card${exp}</div>
+            </div>
+          </div>
+          ${isOn ? '<div class="rbw-pm-check">✓</div>' : ''}
+        `;
+        card.onclick = () => {
+          state.selectedPmId = pm.id;
+          state.selectedMbId = null;
+          renderCheckoutContent(grandTotal);
+        };
+        content.appendChild(card);
+      });
+    } else {
+      // No card on file — prompt to add one via Momence-hosted flow
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'rbw-pm-empty';
+      emptyEl.innerHTML = `<p>No saved payment method on file.</p>`;
+      const addBtn = document.createElement('button');
+      addBtn.className = 'rbw-btn rbw-btn-outline btn-sm';
+      addBtn.style.display = 'inline-block';
+      addBtn.textContent = '+ Add a Card';
+      addBtn.onclick = () => openAddCardPopup(grandTotal);
+      emptyEl.appendChild(addBtn);
+      content.appendChild(emptyEl);
+    }
+
+    // Enable confirm button only when a payment method is chosen
+    const canProceed = !!(state.selectedPmId || state.selectedMbId);
+    confirmBtn.disabled = !canProceed;
+    confirmBtn.onclick = canProceed ? () => submitCheckout(grandTotal) : null;
+  }
+
+  // Opens the Momence-hosted add-card page in a popup.
+  // Polls for a new saved payment method every 2 s; re-renders once found.
+  async function openAddCardPopup(grandTotal) {
+    const errDiv = document.getElementById('rbw-checkout-err');
+    if (errDiv) errDiv.innerHTML = '';
+
+    try {
+      const data = await proxyPost('/payment-methods/setup', {});
+      // Response shape may vary — look for the URL in common field names
+      const url  = data?.url || data?.redirectUrl || data?.manageUrl;
+      if (!url || typeof url !== 'string') {
+        throw new Error('Could not retrieve payment setup URL. Please contact us to add a card.');
+      }
+
+      const popup = window.open(url, 'rbw-add-card', 'width=580,height=720,scrollbars=yes,resizable=yes');
+
+      let pollInterval;
+      let popupWatcher;
+
+      const cleanup = () => { clearInterval(pollInterval); clearInterval(popupWatcher); };
+
+      // Poll every 2 s while popup is open
+      pollInterval = setInterval(async () => {
+        try {
+          const d       = await authGet('/payment-methods');
+          const methods = d?.paymentMethods || d?.data || (Array.isArray(d) ? d : []);
+          if (methods.length > 0) {
+            cleanup();
+            state.savedPaymentMethods = methods;
+            state.selectedPmId = methods[0].id;
+            state.selectedMbId = null;
+            if (popup && !popup.closed) popup.close();
+            renderCheckoutContent(grandTotal);
+          }
+        } catch { /* keep polling */ }
+      }, 2000);
+
+      // Watch for popup close and do a final check
+      popupWatcher = setInterval(() => {
+        if (!popup || popup.closed) {
+          cleanup();
+          setTimeout(async () => {
+            try {
+              const d       = await authGet('/payment-methods');
+              const methods = d?.paymentMethods || d?.data || (Array.isArray(d) ? d : []);
+              state.savedPaymentMethods = methods;
+              if (methods.length > 0) {
+                state.selectedPmId = methods[0].id;
+                state.selectedMbId = null;
+              }
+            } catch { /* use existing state */ }
+            renderCheckoutContent(grandTotal);
+          }, 600);
+        }
+      }, 1000);
+    } catch (err) {
+      if (errDiv) errDiv.innerHTML = `<div class="rbw-alert rbw-err">${err.message}</div>`;
+    }
+  }
+
+  // Submits the booking to Momence via the backend proxy.
+  async function submitCheckout(grandTotal) {
+    const btn    = document.getElementById('rbw-confirm-btn');
+    const errDiv = document.getElementById('rbw-checkout-err');
+    if (btn)    { btn.disabled = true; btn.textContent = 'Processing…'; }
+    if (errDiv) errDiv.innerHTML = '';
+
+    try {
+      // Use the stored ISO value from the slot (already correct UTC time from Momence)
+      const startsAt = state.selectedSlot?.isoValue || null;
+
+      await proxyPost('/checkout', {
+        duration:              state.duration,
+        startsAt,
+        therapistId:           state.staffId || null,
+        appointmentServiceId:  state.service?.appointmentServiceId || undefined,
+        addonIds:              state.selectedAddons.map(a => a.id),
+        savedPaymentMethodId:  state.selectedPmId || undefined,
+        boughtMembershipId:    state.selectedMbId || undefined,
+      });
+      goTo(S.CONFIRMATION);
+    } catch (err) {
+      if (btn) { btn.disabled = false; btn.textContent = `Confirm Booking · ${fmt(grandTotal)}`; }
+      if (errDiv) errDiv.innerHTML = `<div class="rbw-alert rbw-err">${err.message}</div>`;
+    }
+  }
+
+  // ─── Step 8: Confirmation ──────────────────────────────────────────────────
+  function renderConfirmation() {
+    // Mark user as having visited so the first-visit banner won't appear again
+    try { localStorage.setItem('rbw_visited', '1'); } catch { /* private browsing */ }
+
+    const body    = document.getElementById('rbw-body');
+    const dateStr = state.selectedDate ? fmtDate(state.selectedDate) : '';
+    const timeStr = state.selectedSlot?.time || '';
+    const txName  = state.staffName || null;
+
+    function gcalLink() {
+      if (!state.selectedSlot?.isoValue) return '#';
+      const start = new Date(state.selectedSlot.isoValue);
+      const end   = new Date(start.getTime() + (state.duration || 60) * 60000);
+      const f     = d => d.toISOString().replace(/[-:]/g,'').slice(0,15) + 'Z';
+      return `https://calendar.google.com/calendar/render?action=TEMPLATE`
+           + `&text=${encodeURIComponent('Revive Bodywork — ' + (state.service?.name || 'Session'))}`
+           + `&dates=${f(start)}/${f(end)}`
+           + `&details=${encodeURIComponent('Your massage at Revive Bodywork Denver.\n\nSee you soon!')}`
+           + `&location=${encodeURIComponent('Revive Bodywork, Denver, CO')}`;
+    }
+
+    body.innerHTML = `
+      <div class="rbw-check-icon">${I.check}</div>
+      <h2 class="rbw-conf-title">You're all booked!</h2>
+      <p class="rbw-conf-sub">A confirmation email is heading your way.</p>
+      <div class="rbw-conf-card">
+        <div class="rbw-conf-row">
+          <div class="rbw-conf-ico">${I.spa}</div>
+          <div class="rbw-conf-txt">
+            <strong>${state.service?.name || 'Session'}</strong>
+            <span>${state.duration} minute session</span>
+          </div>
+        </div>
+        <div class="rbw-conf-row">
+          <div class="rbw-conf-ico">${I.cal}</div>
+          <div class="rbw-conf-txt">
+            <strong>${dateStr}</strong>
+            <span>${timeStr}</span>
+          </div>
+        </div>
+        ${txName ? `
+        <div class="rbw-conf-row">
+          <div class="rbw-conf-ico">${I.user}</div>
+          <div class="rbw-conf-txt">
+            <strong>${txName}</strong>
+            <span>Your therapist</span>
+          </div>
+        </div>` : ''}
+        <div class="rbw-conf-row">
+          <div class="rbw-conf-ico">${I.pin}</div>
+          <div class="rbw-conf-txt">
+            <strong>Revive Bodywork</strong>
+            <span>Denver, CO · directions in your email</span>
+          </div>
+        </div>
+      </div>
+      <a href="${gcalLink()}" target="_blank" rel="noopener"
+         style="display:flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;"
+         class="rbw-btn rbw-btn-primary">
+        ${I.cal}<span>Add to Calendar</span>
+      </a>
+      <button class="rbw-btn rbw-btn-ghost" onclick="window.RBWWidget.close()" style="margin-top:10px;">Done</button>
+    `;
+  }
+
+  // ─── Init ──────────────────────────────────────────────────────────────────
+  function init() {
+    // Inject CSS
+    const style = document.createElement('style');
+    style.textContent = CSS;
+    document.head.appendChild(style);
+
+    // Build panel shell
+    const overlay = document.createElement('div');
+    overlay.id = 'rbw-overlay';
+    overlay.onclick = closePanel;
+
+    const panel = document.createElement('div');
+    panel.id = 'rbw-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', 'Book a massage at Revive Bodywork');
+    panel.innerHTML = `
+      <div class="rbw-hdr">
+        <button class="rbw-icon-btn" id="rbw-back-btn" aria-label="Go back" style="visibility:hidden">${I.back}</button>
+        <div class="rbw-hdr-brand">
+          <b>Revive Bodywork</b>
+          <small>Denver's Premier Self-Care</small>
+        </div>
+        <button class="rbw-icon-btn" id="rbw-close-btn" aria-label="Close">${I.close}</button>
+      </div>
+      <div class="rbw-prog"><div class="rbw-prog-fill" id="rbw-prog-fill" style="width:0%"></div></div>
+      <div id="rbw-body"></div>
+    `;
+
+    document.body.appendChild(overlay);
+    document.body.appendChild(panel);
+
+    document.getElementById('rbw-close-btn').onclick = closePanel;
+    document.getElementById('rbw-back-btn').onclick  = goBack;
+
+    // Floating button
+    if (FLOATING) {
+      const btn = document.createElement('button');
+      btn.id = 'rbw-float';
+      btn.innerHTML = I.plus + '<span>Book Now</span>';
+      btn.onclick = openPanel;
+      document.body.appendChild(btn);
+    }
+
+    // Wire any [data-rbw-book] elements in DOM now
+    function wire(el) {
+      el.addEventListener('click', openPanel);
+    }
+    document.querySelectorAll('[data-rbw-book]').forEach(wire);
+
+    // Watch for dynamically added triggers
+    new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => {
+      if (n.nodeType !== 1) return;
+      if (n.hasAttribute?.('data-rbw-book')) wire(n);
+      n.querySelectorAll?.('[data-rbw-book]').forEach(wire);
+    }))).observe(document.body, { childList: true, subtree: true });
+
+    // ESC to close
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
+
+    // Fetch config once on load — prices and hidden product IDs rarely change at runtime.
+    authGet('/config').then(cfg => {
+      if (cfg?.prices) Object.assign(PRICES, cfg.prices);
+      if (Array.isArray(cfg?.hiddenProductIds)) {
+        cfg.hiddenProductIds.forEach(id => HIDDEN_PRODUCT_IDS.add(id));
+      }
+    }).catch(() => {});
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+  // Public API
+  window.RBWWidget = { open: openPanel, close: closePanel };
+})();

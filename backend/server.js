@@ -38,23 +38,12 @@ app.use(express.json());
 // Serve the widget root as static files so demo.html works at localhost:3001
 app.use(express.static(path.join(__dirname, '..')));
 
-// Serve widget.js — searches several candidate paths so it works in both
-// Railway (where the build step copies it into backend/) and local dev
-// (where it lives one level up). no-cache ensures browsers always get latest.
-const fs = require('fs');
-const WIDGET_CANDIDATES = [
-  path.join(__dirname, 'widget.js'),                    // Railway: build copies it here
-  path.join(__dirname, '..', 'widget.js'),              // local dev: repo root
-  path.join(process.cwd(), 'widget.js'),                // fallback: cwd root
-  path.join(process.cwd(), 'backend', 'widget.js'),     // fallback: cwd/backend
-];
-const WIDGET_PATH = WIDGET_CANDIDATES.find(p => { try { fs.accessSync(p); return true; } catch { return false; } }) || null;
+// Serve widget.js with no-cache headers so Squarespace always loads the latest build.
+// widget.js lives in backend/ (committed alongside server.js) so __dirname resolves
+// correctly in Railway (/app), local dev (backend/), and any other environment.
 app.get('/widget.js', (_req, res) => {
-  if (!WIDGET_PATH) {
-    return res.status(404).json({ error: 'widget.js not found', searched: WIDGET_CANDIDATES, cwd: process.cwd(), dir: __dirname });
-  }
   res.setHeader('Cache-Control', 'no-cache, must-revalidate');
-  res.sendFile(WIDGET_PATH);
+  res.sendFile(path.join(__dirname, 'widget.js'));
 });
 
 // ─── Momence readonly helpers ──────────────────────────────────────────────
