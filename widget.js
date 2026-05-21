@@ -26,36 +26,42 @@
 
   // Steps
   const S = {
-    CATEGORY:     'category',     // Massage or Acupuncture
-    DURATION:     'duration',     // length + service (one page)
-    ADDONS:       'addons',       // pick add-ons
-    THERAPIST:    'therapist',    // pick therapist or "any"
-    CALENDAR:     'calendar',     // pick date + time
-    REVIEW:       'review',       // order summary + promo
-    AUTH:         'auth',         // login / register
-    CHECKOUT:     'checkout',     // payment
-    CONFIRMATION: 'confirmation', // done
+    INTENT:         'intent',         // landing — how do you want to book?
+    CATEGORY:       'category',       // Massage or Acupuncture (legacy, kept for acupuncture path)
+    DURATION:       'duration',       // length + service (one page)
+    ADDONS:         'addons',         // pick add-ons
+    THERAPIST_PICK: 'therapist-pick', // browse therapists with photos
+    THERAPIST:      'therapist',      // pick therapist or "any" (legacy)
+    CALENDAR:       'calendar',       // pick date + time
+    REVIEW:         'review',         // order summary + promo
+    AUTH:           'auth',           // login / register
+    CHECKOUT:       'checkout',       // payment
+    CONFIRMATION:   'confirmation',   // done
   };
 
   const PROGRESS = {
-    [S.CATEGORY]:     5,
-    [S.DURATION]:     18,
-    [S.ADDONS]:       34,
-    [S.THERAPIST]:    50,
-    [S.CALENDAR]:     65,
-    [S.REVIEW]:       78,
-    [S.AUTH]:         88,
-    [S.CHECKOUT]:     95,
-    [S.CONFIRMATION]: 100,
+    [S.INTENT]:         5,
+    [S.CATEGORY]:       10,
+    [S.DURATION]:       25,
+    [S.ADDONS]:         40,
+    [S.THERAPIST_PICK]: 18,
+    [S.THERAPIST]:      50,
+    [S.CALENDAR]:       65,
+    [S.REVIEW]:         78,
+    [S.AUTH]:           88,
+    [S.CHECKOUT]:       95,
+    [S.CONFIRMATION]:   100,
   };
 
   const BACK_TO = {
-    [S.DURATION]:  S.CATEGORY,
-    [S.ADDONS]:    S.DURATION,
-    [S.CALENDAR]:  S.ADDONS,
-    [S.REVIEW]:    S.CALENDAR,
-    [S.AUTH]:      S.REVIEW,
-    [S.CHECKOUT]:  S.REVIEW,
+    [S.CATEGORY]:       S.INTENT,
+    [S.DURATION]:       S.INTENT,
+    [S.ADDONS]:         S.DURATION,
+    [S.THERAPIST_PICK]: S.INTENT,
+    [S.CALENDAR]:       S.ADDONS,
+    [S.REVIEW]:         S.CALENDAR,
+    [S.AUTH]:           S.REVIEW,
+    [S.CHECKOUT]:       S.REVIEW,
   };
 
   // Populated from /api/config on init; defaults match .env
@@ -65,7 +71,8 @@
   // ─── State ─────────────────────────────────────────────────────────────────
   function freshState() {
     return {
-      step:         S.CATEGORY,
+      step:         S.INTENT,
+      path:         null,   // 'service' | 'therapist' | 'time'
       category:     null,   // 'massage' | 'acupuncture'
       duration:     null,   // 30 | 60 | 90 | 120
       board:        null,   // { id, name } selected board
@@ -73,6 +80,7 @@
       selectedAddons:  [],  // [{ id, name, priceInCurrency, durationInMinutes }]
       staffId:      null,   // teacherId or null = any available
       staffName:    null,   // display name for review
+      staffPhoto:   null,   // profile image URL for selected therapist
       selectedDate: null,
       selectedSlot: null,   // { isoValue, time }
       promoCode:    null,   // { code, discount, final } when applied
@@ -84,8 +92,10 @@
       selectedPmId: null,
       selectedMbId: null,
       // Session caches (persist for panel lifetime)
-      _boardsCache: null,
-      _staffCache:  null,
+      _boardsCache:   null,
+      _staffCache:    null,
+      _teachersCache: null,
+      _skippedAddons: false,
     };
   }
   let state = freshState();
@@ -543,6 +553,89 @@
     .rbw-cat-label { font-size: 17px; font-weight: 700; }
     .rbw-cat-desc { font-size: 12px; color: var(--rbw-muted); margin-top: 4px; }
 
+    /* Intent step */
+    .rbw-intent-banner {
+      background: linear-gradient(135deg, var(--rbw-purple) 0%, #2d1f6b 100%);
+      border-radius: var(--rbw-radius); padding: 16px 18px; margin-bottom: 20px; color: #fff;
+      display: flex; align-items: center; gap: 14px;
+    }
+    .rbw-intent-banner-icon {
+      width: 42px; height: 42px; border-radius: 50%; background: rgba(255,255,255,.15);
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .rbw-intent-banner-icon svg { width: 20px; height: 20px; }
+    .rbw-intent-banner-text { flex: 1; }
+    .rbw-intent-banner-title { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+    .rbw-intent-banner-sub { font-size: 12px; opacity: 0.8; }
+    .rbw-intent-banner-btn {
+      background: var(--rbw-primary); color: #fff; border: none; border-radius: 8px;
+      padding: 8px 14px; font-family: var(--rbw-font); font-size: 12px; font-weight: 700;
+      cursor: pointer; white-space: nowrap; flex-shrink: 0; transition: background .15s;
+    }
+    .rbw-intent-banner-btn:hover { background: var(--rbw-primary-dk); }
+    .rbw-intent-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+    .rbw-intent-card {
+      border: 2px solid var(--rbw-border); border-radius: 14px;
+      padding: 20px 16px 18px; cursor: pointer; transition: all .2s;
+      background: var(--rbw-panel); display: flex; flex-direction: column; align-items: flex-start;
+    }
+    .rbw-intent-card:hover { border-color: var(--rbw-purple); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+    .rbw-intent-card.full-width { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 14px; padding: 16px 18px; }
+    .rbw-intent-icon {
+      width: 40px; height: 40px; border-radius: 10px; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 12px; flex-shrink: 0; color: var(--rbw-purple);
+    }
+    .rbw-intent-card.full-width .rbw-intent-icon { margin-bottom: 0; }
+    .rbw-intent-icon svg { width: 20px; height: 20px; }
+    .rbw-intent-label { font-size: 14px; font-weight: 700; color: var(--rbw-text); margin-bottom: 4px; }
+    .rbw-intent-desc { font-size: 12px; color: var(--rbw-muted); line-height: 1.4; }
+    .rbw-intent-acu { margin-top: 4px; text-align: center; }
+    .rbw-intent-acu-link {
+      font-size: 13px; color: var(--rbw-muted); background: none; border: none;
+      cursor: pointer; font-family: var(--rbw-font); text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .rbw-intent-acu-link:hover { color: var(--rbw-purple); }
+
+    /* Therapist pick step */
+    .rbw-tx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .rbw-tx-pick-card {
+      border: 2px solid var(--rbw-border); border-radius: 14px;
+      padding: 16px 14px 14px; cursor: pointer; transition: all .2s;
+      background: var(--rbw-panel); display: flex; flex-direction: column; align-items: center; text-align: center;
+    }
+    .rbw-tx-pick-card:hover { border-color: var(--rbw-purple); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+    .rbw-tx-pick-card.on { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
+    .rbw-tx-pick-photo {
+      width: 64px; height: 64px; border-radius: 50%;
+      background: var(--rbw-purple-lt); color: var(--rbw-purple);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px; font-weight: 700; flex-shrink: 0; overflow: hidden;
+      margin-bottom: 10px; border: 3px solid transparent; transition: border-color .18s;
+    }
+    .rbw-tx-pick-card.on .rbw-tx-pick-photo { border-color: var(--rbw-purple); }
+    .rbw-tx-pick-photo img { width: 100%; height: 100%; object-fit: cover; }
+    .rbw-tx-pick-name { font-size: 13px; font-weight: 700; margin-bottom: 3px; color: var(--rbw-text); }
+    .rbw-tx-pick-spec { font-size: 11px; color: var(--rbw-muted); line-height: 1.4; }
+    .rbw-tx-any-card {
+      border: 2px dashed var(--rbw-border); border-radius: 14px;
+      padding: 16px 14px; cursor: pointer; transition: all .2s;
+      background: var(--rbw-panel); display: flex; align-items: center; gap: 14px;
+      margin-bottom: 16px;
+    }
+    .rbw-tx-any-card:hover { border-color: var(--rbw-purple); background: var(--rbw-purple-lt); }
+    .rbw-tx-any-icon {
+      width: 48px; height: 48px; border-radius: 50%; background: var(--rbw-purple-lt);
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--rbw-purple);
+    }
+    .rbw-tx-any-icon svg { width: 22px; height: 22px; }
+    .rbw-slot-badge {
+      background: var(--rbw-primary); color: #fff;
+      font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+      padding: 2px 6px; border-radius: 20px; margin-left: 6px; vertical-align: middle;
+    }
+
     /* Appointment summary bar */
     .rbw-appt-summary {
       background: var(--rbw-purple-lt); border: 1px solid rgba(65,47,131,.15);
@@ -627,7 +720,7 @@
       panel.classList.add('rbw-open');
     });
     document.body.style.overflow = 'hidden';
-    goTo(S.CATEGORY);
+    goTo(S.INTENT);
   }
 
   function closePanel() {
@@ -646,6 +739,8 @@
     let target = BACK_TO[state.step];
     // If addons were skipped (no addons or all filtered), skip back past them too
     if (target === S.ADDONS && state._skippedAddons) target = S.DURATION;
+    // On therapist path, DURATION back goes to THERAPIST_PICK
+    if (target === S.INTENT && state.step === S.DURATION && state.path === 'therapist') target = S.THERAPIST_PICK;
     if (target) goTo(target);
   }
 
@@ -667,19 +762,145 @@
   // ─── Router ────────────────────────────────────────────────────────────────
   function render(step) {
     switch (step) {
-      case S.CATEGORY:     renderCategory();      break;
-      case S.DURATION:     renderDuration();      break;
-      case S.ADDONS:       renderAddons();        break;
-      case S.THERAPIST:    renderTherapist();     break;
-      case S.CALENDAR:     renderCalendar();      break;
-      case S.REVIEW:       renderReview();        break;
-      case S.AUTH:         renderAuth();          break;
-      case S.CHECKOUT:     renderCheckout();      break;
-      case S.CONFIRMATION: renderConfirmation();  break;
+      case S.INTENT:         renderIntent();        break;
+      case S.CATEGORY:       renderCategory();      break;
+      case S.DURATION:       renderDuration();      break;
+      case S.ADDONS:         renderAddons();        break;
+      case S.THERAPIST_PICK: renderTherapistPick(); break;
+      case S.THERAPIST:      renderTherapist();     break;
+      case S.CALENDAR:       renderCalendar();      break;
+      case S.REVIEW:         renderReview();        break;
+      case S.AUTH:           renderAuth();          break;
+      case S.CHECKOUT:       renderCheckout();      break;
+      case S.CONFIRMATION:   renderConfirmation();  break;
     }
   }
 
-  // ─── Step 0: Category ────────────────────────────────────────────────────
+  // ─── Step 0: Intent — how do you want to book? ───────────────────────────
+  function renderIntent() {
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = '';
+
+    const title = document.createElement('h2');
+    title.className = 'rbw-title';
+    title.textContent = 'Welcome to Revive Bodywork';
+    body.appendChild(title);
+
+    const sub = document.createElement('p');
+    sub.className = 'rbw-subtitle';
+    sub.textContent = 'How would you like to book?';
+    body.appendChild(sub);
+
+    // First-visit banner — shown only when no prior visit recorded in localStorage
+    const isFirstVisit = !localStorage.getItem('rbw_visited');
+    if (isFirstVisit) {
+      const banner = document.createElement('div');
+      banner.className = 'rbw-intent-banner';
+      banner.innerHTML = `
+        <div class="rbw-intent-banner-icon">${SVG('<path d="M10 2c0 0-6 4-6 8a6 6 0 0 0 12 0c0-4-6-8-6-8Z"/><circle cx="10" cy="10" r="2" fill="currentColor" stroke="none"/>')}</div>
+        <div class="rbw-intent-banner-text">
+          <div class="rbw-intent-banner-title">First visit? Welcome!</div>
+          <div class="rbw-intent-banner-sub">New clients get 20% off their first session.</div>
+        </div>
+        <button class="rbw-intent-banner-btn" id="rbw-intro-shortcut">Claim Offer →</button>
+      `;
+      body.appendChild(banner);
+
+      banner.querySelector('#rbw-intro-shortcut').onclick = async () => {
+        const btn = banner.querySelector('#rbw-intro-shortcut');
+        btn.disabled = true; btn.textContent = 'Loading…';
+        try {
+          if (!state._boardsCache) state._boardsCache = await authGet('/boards');
+          const introBoard = state._boardsCache.find(b => b.name.toLowerCase().includes('intro'));
+          if (introBoard && introBoard.services[0]) {
+            const svc = introBoard.services[0];
+            state.path           = 'service';
+            state.category       = 'massage';
+            state.board          = { id: introBoard.id, name: introBoard.name };
+            state.service        = svc;
+            state.duration       = svc.minDurationInMinutes;
+            state.selectedAddons = [];
+            state._staffCache    = null;
+            goTo(S.ADDONS);
+          }
+        } catch { btn.disabled = false; btn.textContent = 'Claim Offer →'; }
+      };
+    }
+
+    // Three intent cards
+    const grid = document.createElement('div');
+    grid.className = 'rbw-intent-grid';
+
+    const paths = [
+      {
+        key: 'service',
+        icon: SVG('<path d="M2 6Q6 3 10 6Q14 9 18 6"/><path d="M2 11Q6 8 10 11Q14 14 18 11"/><path d="M2 16Q6 13 10 16Q14 19 18 16"/>'),
+        label: 'By Service',
+        desc: 'Browse massages, specialty treatments, and intro offers.',
+      },
+      {
+        key: 'therapist',
+        icon: SVG('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+        label: 'By Therapist',
+        desc: 'Pick your favorite therapist, then find a time that works.',
+      },
+    ];
+
+    paths.forEach(({ key, icon, label, desc }) => {
+      const card = document.createElement('div');
+      card.className = 'rbw-intent-card';
+      card.innerHTML = `
+        <div class="rbw-intent-icon">${icon}</div>
+        <div class="rbw-intent-label">${label}</div>
+        <div class="rbw-intent-desc">${desc}</div>
+      `;
+      card.onclick = () => {
+        state.path     = key;
+        state.category = 'massage';
+        if (key === 'therapist') {
+          goTo(S.THERAPIST_PICK);
+        } else {
+          goTo(S.DURATION);
+        }
+      };
+      grid.appendChild(card);
+    });
+
+    // "By Time" as full-width third card
+    const timeCard = document.createElement('div');
+    timeCard.className = 'rbw-intent-card full-width';
+    timeCard.innerHTML = `
+      <div class="rbw-intent-icon">${SVG('<circle cx="10" cy="10" r="8"/><polyline points="10 5 10 10 14 12"/>')}</div>
+      <div>
+        <div class="rbw-intent-label">By Available Time</div>
+        <div class="rbw-intent-desc">See all open slots across all therapists — we'll highlight the best ones.</div>
+      </div>
+    `;
+    timeCard.onclick = () => {
+      state.path     = 'time';
+      state.category = 'massage';
+      goTo(S.DURATION);
+    };
+    grid.appendChild(timeCard);
+
+    body.appendChild(grid);
+
+    // Acupuncture link
+    const acuWrap = document.createElement('div');
+    acuWrap.className = 'rbw-intent-acu';
+    const acuLink = document.createElement('button');
+    acuLink.className = 'rbw-intent-acu-link';
+    acuLink.textContent = 'Booking acupuncture? Click here →';
+    acuLink.onclick = () => {
+      state.path     = 'service';
+      state.category = 'acupuncture';
+      goTo(S.DURATION);
+    };
+    acuWrap.appendChild(acuLink);
+    body.appendChild(acuWrap);
+  }
+
+  // ─── Step 0b: Category (legacy, kept for direct acupuncture path) ─────────
   function renderCategory() {
     const body = document.getElementById('rbw-body');
     body.innerHTML = '';
@@ -742,6 +963,23 @@
       ? 'Select an acupuncture appointment'
       : 'Choose a length, then pick your service';
     body.appendChild(sub);
+
+    // Therapist context bar — shown when coming from the "By Therapist" path
+    if (state.path === 'therapist' && state.staffName) {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'display:flex;align-items:center;gap:10px;background:var(--rbw-purple-lt);border:1px solid rgba(65,47,131,.15);border-radius:10px;padding:10px 14px;margin-bottom:18px;';
+      const av = buildAvatar(state.staffName, state.staffPhoto, 'rbw-tx-chip-avatar');
+      av.style.cssText = 'width:36px;height:36px;border-radius:50%;flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;';
+      if (!state.staffPhoto) {
+        av.style.background = avatarColor(state.staffId);
+        av.style.color = '#fff';
+      }
+      const info = document.createElement('div');
+      info.innerHTML = `<div style="font-size:12px;color:var(--rbw-muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em;">Booking with</div><div style="font-size:13px;font-weight:700;color:var(--rbw-purple);">${state.staffName}</div>`;
+      bar.appendChild(av);
+      bar.appendChild(info);
+      body.appendChild(bar);
+    }
 
     if (!isAcu) {
       // Featured Intro Offers shortcut — bypasses duration picker
@@ -1185,6 +1423,92 @@
     }
   }
 
+  // ─── Step 3b: Therapist Pick — browse therapists with real photos ─────────
+  async function renderTherapistPick() {
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = `
+      <h2 class="rbw-title">Choose your therapist</h2>
+      <p class="rbw-subtitle">Select who you'd like to work with</p>
+      <div id="rbw-tx-pick-any"></div>
+      <div class="rbw-lbl" style="margin-bottom:10px;">Our Team</div>
+      <div id="rbw-tx-pick-grid" class="rbw-tx-grid">
+        <div class="rbw-spin-wrap" style="grid-column:1/-1;padding:24px 0;"><div class="rbw-spinner"></div><span>Loading therapists…</span></div>
+      </div>
+    `;
+
+    // "Any Available" card
+    const anyWrap = document.getElementById('rbw-tx-pick-any');
+    const anyCard = document.createElement('div');
+    anyCard.className = 'rbw-tx-any-card';
+    anyCard.innerHTML = `
+      <div class="rbw-tx-any-icon">${SVG('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>')}</div>
+      <div>
+        <div class="rbw-tx-pick-name" style="text-align:left;font-size:14px;">Any Available Therapist</div>
+        <div class="rbw-tx-pick-spec" style="text-align:left;">Best availability — we'll match you</div>
+      </div>
+    `;
+    anyCard.onclick = () => {
+      state.staffId   = null;
+      state.staffName = null;
+      state.staffPhoto = null;
+      goTo(S.DURATION);
+    };
+    anyWrap.appendChild(anyCard);
+
+    try {
+      if (!state._teachersCache) {
+        state._teachersCache = await authGet('/teachers');
+      }
+      const teachers = state._teachersCache;
+      const grid = document.getElementById('rbw-tx-pick-grid');
+      if (!grid) return;
+      grid.innerHTML = '';
+
+      teachers.forEach(t => {
+        const fullName = `${t.firstName} ${t.lastName}`.trim() || 'Therapist';
+        const isOn = state.staffId === t.id;
+        const card = document.createElement('div');
+        card.className = 'rbw-tx-pick-card' + (isOn ? ' on' : '');
+
+        const photo = document.createElement('div');
+        photo.className = 'rbw-tx-pick-photo';
+        if (t.photo) {
+          const img = document.createElement('img');
+          img.src = t.photo; img.alt = fullName;
+          photo.appendChild(img);
+        } else {
+          photo.textContent = initials(fullName);
+          photo.style.background = avatarColor(t.id);
+          photo.style.color = '#fff';
+        }
+
+        const name = document.createElement('div');
+        name.className = 'rbw-tx-pick-name';
+        name.textContent = fullName;
+
+        const spec = document.createElement('div');
+        spec.className = 'rbw-tx-pick-spec';
+        spec.textContent = t.specialty || 'Licensed Massage Therapist';
+
+        card.appendChild(photo);
+        card.appendChild(name);
+        card.appendChild(spec);
+
+        card.onclick = () => {
+          state.staffId    = t.id;
+          state.staffName  = fullName;
+          state.staffPhoto = t.photo || null;
+          state._staffCache = null;
+          goTo(S.DURATION);
+        };
+        grid.appendChild(card);
+      });
+    } catch {
+      const grid = document.getElementById('rbw-tx-pick-grid');
+      if (grid) grid.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;grid-column:1/-1;">Couldn't load therapists. Please try again.</p>`;
+    }
+  }
+
   // ─── Step 4: Calendar ────────────────────────────────────────────────────
   function renderCalendar() {
     const body = document.getElementById('rbw-body');
@@ -1197,7 +1521,7 @@
     // Title + summary
     const title = document.createElement('h2');
     title.className = 'rbw-title';
-    title.textContent = 'Choose your time';
+    title.textContent = state.path === 'time' ? 'Find a time' : 'Choose your time';
     body.appendChild(title);
 
     const sb = buildSummaryBar();
@@ -1250,6 +1574,33 @@
   }
 
   async function loadCalendarStaff() {
+    // On time/therapist paths, we use /api/availability (cross-therapist).
+    // We still need therapist chips — load from /api/teachers if we have the cache.
+    const useSmartCalendar = state.path === 'time' || state.path === 'therapist';
+
+    if (useSmartCalendar) {
+      try {
+        if (!state._teachersCache) state._teachersCache = await authGet('/teachers');
+        const staff = state._teachersCache.map(t => ({
+          teacherId: t.id,
+          name: `${t.firstName} ${t.lastName}`.trim() || 'Therapist',
+          photo: t.photo || null,
+        }));
+        // Pre-filter to just the selected therapist if on therapist path
+        const filtered = state.path === 'therapist' && state.staffId
+          ? staff.filter(m => m.teacherId === state.staffId)
+          : staff;
+        state._staffCache = filtered;
+        renderTherapistChips(filtered);
+      } catch {
+        state._staffCache = [];
+        renderTherapistChips([]);
+      }
+      findFirstAvailable();
+      return;
+    }
+
+    // Service path: existing board-based staff logic
     const baseServiceId   = state.service.appointmentServiceId;
     const addonServiceIds = (state.selectedAddons || []).map(a => a.id).filter(Boolean);
 
@@ -1270,8 +1621,9 @@
 
       // Auto-select if only one therapist qualifies
       if (filteredStaff.length === 1 && !state.staffId) {
-        state.staffId   = filteredStaff[0].teacherId;
-        state.staffName = filteredStaff[0].name;
+        state.staffId    = filteredStaff[0].teacherId;
+        state.staffName  = filteredStaff[0].name;
+        state.staffPhoto = filteredStaff[0].photo || null;
       }
 
       renderTherapistChips(filteredStaff);
@@ -1312,6 +1664,7 @@
       chip.onclick = () => {
         state.staffId      = id;
         state.staffName    = id ? name : null;
+        state.staffPhoto   = id ? photo : null;
         state.selectedSlot = null;
         row.querySelectorAll('.rbw-tx-chip').forEach(c => c.classList.remove('on'));
         chip.classList.add('on');
@@ -1330,46 +1683,99 @@
     const faMount = document.getElementById('rbw-first-avail-mount');
     if (faMount) faMount.innerHTML = `<div class="rbw-spin-wrap" style="color:#fff"><div class="rbw-spinner" style="border-color:rgba(255,255,255,.25);border-top-color:#fff"></div><span>Finding first available…</span></div>`;
 
-    const boardId   = state.board?.id;
-    const serviceId = state.service?.appointmentServiceId;
-    if (!boardId || !serviceId) return;
-
-    const p2  = n => String(n).padStart(2, '0');
+    const useSmartCalendar = state.path === 'time' || state.path === 'therapist';
+    const p2   = n => String(n).padStart(2, '0');
     const fmtD = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 
     const start = new Date(); start.setHours(0, 0, 0, 0);
-    const end   = new Date(start); end.setDate(end.getDate() + 14);
-
-    let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${fmtD(start)}&to=${fmtD(end)}`;
-    if (state.staffId) qs += `&staffId=${state.staffId}`;
 
     try {
-      const data = await authGet(qs);
-      const raw  = Array.isArray(data) ? data.flat() : [];
-      const open = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+      let firstSlotDate = null;
+      let firstSlot     = null;
 
-      if (!open.length) {
-        if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
-        updateCalCta();
-        return;
+      if (useSmartCalendar) {
+        // Smart path: scan day-by-day hitting /api/availability until we find a slot
+        const dur = state.duration || 60;
+        for (let i = 0; i < 14; i++) {
+          const d = new Date(start); d.setDate(d.getDate() + i);
+          const dateStr = fmtD(d);
+          let qs = `/availability?date=${dateStr}&duration=${dur}`;
+          if (state.staffId) qs += `&therapistId=${state.staffId}`;
+          const data = await authGet(qs);
+          const slots = data.slots || [];
+          if (slots.length) {
+            firstSlotDate = d;
+            firstSlot = slots[0]; // already sorted by score desc
+            break;
+          }
+        }
+        if (!firstSlot) {
+          if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
+          updateCalCta(); return;
+        }
+        state.selectedDate = firstSlotDate;
+        rebuildCalendarSelection();
+        // Convert smart slot format to local slot
+        const smartLocalSlot = smartSlotToLocal(firstSlot, firstSlotDate);
+        if (faMount) { faMount.innerHTML = ''; faMount.appendChild(renderFirstAvailCard(smartLocalSlot)); }
+        // Populate day slots
+        const section = document.getElementById('rbw-avail-section');
+        if (section) await loadAvailability(firstSlotDate);
+      } else {
+        // Service path: original board-based approach
+        const boardId   = state.board?.id;
+        const serviceId = state.service?.appointmentServiceId;
+        if (!boardId || !serviceId) return;
+
+        const end = new Date(start); end.setDate(end.getDate() + 14);
+        let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${fmtD(start)}&to=${fmtD(end)}`;
+        if (state.staffId) qs += `&staffId=${state.staffId}`;
+
+        const data = await authGet(qs);
+        const raw  = Array.isArray(data) ? data.flat() : [];
+        const open = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+
+        if (!open.length) {
+          if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
+          updateCalCta(); return;
+        }
+
+        firstSlot = open[0];
+        const fd = new Date(firstSlot.value); fd.setHours(0, 0, 0, 0);
+        state.selectedDate = fd;
+        rebuildCalendarSelection();
+
+        const slot = toLocalSlot(firstSlot);
+        if (faMount) { faMount.innerHTML = ''; faMount.appendChild(renderFirstAvailCard(slot)); }
+
+        const dayStr  = fmtD(fd);
+        const dayRaw  = open.filter(s => s.value.startsWith(dayStr));
+        const section = document.getElementById('rbw-avail-section');
+        if (section) renderAvailability(dayRaw, section);
       }
-
-      const firstSlot    = open[0];
-      const firstDate    = new Date(firstSlot.value); firstDate.setHours(0, 0, 0, 0);
-      state.selectedDate = firstDate;
-      rebuildCalendarSelection();
-
-      const slot = toLocalSlot(firstSlot);
-      if (faMount) { faMount.innerHTML = ''; faMount.appendChild(renderFirstAvailCard(slot)); }
-
-      // Also populate the time-chip section for that day
-      const dayStr  = fmtD(firstDate);
-      const dayRaw  = open.filter(s => s.value.startsWith(dayStr));
-      const section = document.getElementById('rbw-avail-section');
-      if (section) renderAvailability(dayRaw, section);
     } catch {
       if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">Couldn't load availability. Please try again.</p>`;
     }
+  }
+
+  // Convert a slot from /api/availability format to a local slot object
+  function smartSlotToLocal(slot, date) {
+    const p2 = n => String(n).padStart(2, '0');
+    const h  = Math.floor(slot.minuteOffset / 60);
+    const m  = slot.minuteOffset % 60;
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12  = h > 12 ? h - 12 : h === 0 ? 12 : h;
+    const time = `${h12}:${p2(m)} ${ampm}`;
+    const isoValue = `${date.getFullYear()}-${p2(date.getMonth()+1)}-${p2(date.getDate())}T${p2(h)}:${p2(m)}:00`;
+    return {
+      isoValue,
+      time,
+      minuteOffset: slot.minuteOffset,
+      teacherId:    slot.therapistId   || null,
+      therapistName: slot.therapistName || null,
+      therapistPhoto: slot.therapistPhoto || null,
+      score:         slot.score         || 0,
+    };
   }
 
   function toLocalSlot(s) {
@@ -1388,24 +1794,112 @@
 
     const p2 = n => String(n).padStart(2, '0');
     const dateStr = `${date.getFullYear()}-${p2(date.getMonth() + 1)}-${p2(date.getDate())}`;
-    const nextDay = new Date(date); nextDay.setDate(nextDay.getDate() + 1);
-    const toStr   = `${nextDay.getFullYear()}-${p2(nextDay.getMonth() + 1)}-${p2(nextDay.getDate())}`;
-
-    const boardId   = state.board?.id;
-    const serviceId = state.service?.appointmentServiceId;
-    if (!boardId || !serviceId) return;
-
-    let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${dateStr}&to=${toStr}`;
-    if (state.staffId) qs += `&staffId=${state.staffId}`;
 
     try {
-      const data = await authGet(qs);
-      const raw  = Array.isArray(data) ? data.flat() : [];
-      const open = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
-      renderAvailability(open, section);
+      if (state.path === 'time' || state.path === 'therapist') {
+        // Smart calendar: /api/availability returns gap-scored slots with therapist info
+        const dur = state.duration || 60;
+        let qs = `/availability?date=${dateStr}&duration=${dur}`;
+        if (state.staffId) qs += `&therapistId=${state.staffId}`;
+        const data = await authGet(qs);
+        renderSmartAvailability(data.slots || [], date, section);
+      } else {
+        // Service path: board-based availability
+        const nextDay = new Date(date); nextDay.setDate(nextDay.getDate() + 1);
+        const toStr   = `${nextDay.getFullYear()}-${p2(nextDay.getMonth() + 1)}-${p2(nextDay.getDate())}`;
+        const boardId   = state.board?.id;
+        const serviceId = state.service?.appointmentServiceId;
+        if (!boardId || !serviceId) return;
+        let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${dateStr}&to=${toStr}`;
+        if (state.staffId) qs += `&staffId=${state.staffId}`;
+        const data = await authGet(qs);
+        const raw  = Array.isArray(data) ? data.flat() : [];
+        const open = raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+        renderAvailability(open, section);
+      }
     } catch {
       section.innerHTML = `<p style="color:var(--rbw-muted);font-size:14px;text-align:center;padding:20px 0;">Couldn't load times. Please try again.</p>`;
     }
+  }
+
+  // Renders smart-calendar slots (from /api/availability) with therapist cards + Recommended badge
+  function renderSmartAvailability(slots, date, section) {
+    section.innerHTML = '';
+
+    if (!slots.length) {
+      const noAvail = document.createElement('div');
+      noAvail.className = 'rbw-no-avail';
+      noAvail.innerHTML = `<p>No availability on this date.</p>`;
+      section.appendChild(noAvail);
+      updateCalCta(); return;
+    }
+
+    const orDiv = document.createElement('div');
+    orDiv.className = 'rbw-or';
+    orDiv.textContent = 'available times';
+    section.appendChild(orDiv);
+
+    const topScore = slots[0]?.score || 0;
+
+    const list = document.createElement('div');
+    list.className = 'rbw-slot-list';
+
+    slots.forEach(slot => {
+      const localSlot = smartSlotToLocal(slot, date);
+      const isOn = state.selectedSlot?.minuteOffset === localSlot.minuteOffset
+                && state.selectedSlot?.therapistId   === localSlot.teacherId;
+      const isRecommended = slot.score >= topScore && topScore > 50;
+
+      const row = document.createElement('div');
+      row.className = 'rbw-slot-row' + (isOn ? ' on' : '');
+
+      // Time + optional recommended badge
+      const timeEl = document.createElement('div');
+      timeEl.className = 'rbw-slot-time';
+      timeEl.innerHTML = localSlot.time + (isRecommended ? '<span class="rbw-slot-badge">Best</span>' : '');
+
+      // Therapist avatar + name
+      const txEl = document.createElement('div');
+      txEl.className = 'rbw-slot-tx';
+      const av = buildAvatar(slot.therapistName, slot.therapistPhoto, 'rbw-slot-avatar');
+      if (!slot.therapistPhoto && slot.therapistId) {
+        av.style.background = avatarColor(slot.therapistId);
+        av.style.color = '#fff';
+      }
+      const txName = document.createElement('div');
+      txName.className = 'rbw-slot-tx-name';
+      txName.textContent = slot.therapistName || 'Therapist';
+      txEl.appendChild(av);
+      txEl.appendChild(txName);
+
+      const check = document.createElement('div');
+      check.className = 'rbw-slot-check';
+      check.innerHTML = '✓';
+
+      row.appendChild(timeEl);
+      row.appendChild(txEl);
+      row.appendChild(check);
+
+      row.onclick = () => {
+        state.selectedSlot = localSlot;
+        state.staffId      = slot.therapistId   || state.staffId;
+        state.staffName    = slot.therapistName  || state.staffName;
+        state.staffPhoto   = slot.therapistPhoto || state.staffPhoto;
+        list.querySelectorAll('.rbw-slot-row').forEach(r => r.classList.remove('on'));
+        row.classList.add('on');
+        updateCalCta();
+      };
+
+      list.appendChild(row);
+    });
+
+    section.appendChild(list);
+    // Auto-select top slot if nothing chosen yet for this date
+    if (!state.selectedSlot || state.selectedSlot._date !== date.toDateString()) {
+      const topRow = list.querySelector('.rbw-slot-row');
+      if (topRow) topRow.click();
+    }
+    updateCalCta();
   }
 
   function renderAvailability(rawSlots, section) {
@@ -1436,17 +1930,26 @@
   // Renders into the purple #rbw-first-avail-mount div (not a standalone card)
   function renderFirstAvailCard(slot) {
     const wrap = document.createElement('div');
-    // Therapist avatar inline
-    const txName = slot.therapistName || (state.staffId ? state.staffName : null);
-    const txId   = slot.teacherId;
+    const txName  = slot.therapistName  || (state.staffId ? state.staffName : null);
+    const txId    = slot.teacherId;
+    const txPhoto = slot.therapistPhoto || (state.staffId === txId ? state.staffPhoto : null);
+
+    // Build therapist row — real photo if available
     let avatarHtml = '';
     if (txName) {
-      const bg  = txId ? avatarColor(txId) : 'rgba(255,255,255,.2)';
-      const ini = initials(txName);
-      avatarHtml = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
-        <div style="width:32px;height:32px;border-radius:50%;background:${bg};color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;">${ini}</div>
-        <span style="font-size:13px;opacity:0.9;font-weight:500;">with ${txName}</span>
-      </div>`;
+      if (txPhoto) {
+        avatarHtml = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+          <div style="width:32px;height:32px;border-radius:50%;overflow:hidden;flex-shrink:0;"><img src="${txPhoto}" alt="${txName}" style="width:100%;height:100%;object-fit:cover;"/></div>
+          <span style="font-size:13px;opacity:0.9;font-weight:500;">with ${txName}</span>
+        </div>`;
+      } else {
+        const bg  = txId ? avatarColor(txId) : 'rgba(255,255,255,.2)';
+        const ini = initials(txName);
+        avatarHtml = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+          <div style="width:32px;height:32px;border-radius:50%;background:${bg};color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;">${ini}</div>
+          <span style="font-size:13px;opacity:0.9;font-weight:500;">with ${txName}</span>
+        </div>`;
+      }
     }
     wrap.innerHTML = `
       <div class="rbw-first-avail-label">⚡ First Availability</div>
@@ -1457,6 +1960,9 @@
     `;
     wrap.querySelector('#rbw-book-first').onclick = () => {
       state.selectedSlot = slot;
+      if (slot.teacherId)    state.staffId    = slot.teacherId;
+      if (slot.therapistName) state.staffName = slot.therapistName;
+      if (slot.therapistPhoto) state.staffPhoto = slot.therapistPhoto;
       goTo(S.REVIEW);
     };
     return wrap;
@@ -2130,6 +2636,9 @@
 
   // ─── Step 8: Confirmation ──────────────────────────────────────────────────
   function renderConfirmation() {
+    // Mark user as having visited so the first-visit banner won't appear again
+    try { localStorage.setItem('rbw_visited', '1'); } catch { /* private browsing */ }
+
     const body    = document.getElementById('rbw-body');
     const dateStr = state.selectedDate ? fmtDate(state.selectedDate) : '';
     const timeStr = state.selectedSlot?.time || '';

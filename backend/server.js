@@ -599,6 +599,21 @@ app.post('/api/promo/validate', (req, res) => {
   });
 });
 
+// ─── Teachers (public — returns photos from v1 for widget UI) ─────────────
+app.get('/api/teachers', async (_req, res) => {
+  try {
+    const teachers = await getTeachers();
+    res.json(teachers.map(t => ({
+      id:        t.id,
+      firstName: (t.firstName || '').trim(),
+      lastName:  (t.lastName  || '').trim(),
+      bio:       t.bio       || null,
+      photo:     t.profileImage || null,
+      specialty: t.specialty || t.title || null,
+    })));
+  } catch (err) { apiError(res, err); }
+});
+
 // ─── Boards (real Momence data) ────────────────────────────────────────────
 app.get('/api/boards', async (_req, res) => {
   try { res.json(await getBoards()); }
@@ -606,20 +621,28 @@ app.get('/api/boards', async (_req, res) => {
 });
 
 // GET /api/boards/:boardId/staff?serviceId=X
+// Cross-references v1 teachers to populate real profile photos.
 app.get('/api/boards/:boardId/staff', async (req, res) => {
   const { boardId } = req.params;
   const { serviceId } = req.query;
   if (!serviceId) return res.status(400).json({ message: 'serviceId is required' });
   try {
-    const raw = await readonlyGet(`/plugin/appointment-boards/${boardId}/staff`, { hostId: HOST_ID, serviceId });
+    const [raw, teachers] = await Promise.all([
+      readonlyGet(`/plugin/appointment-boards/${boardId}/staff`, { hostId: HOST_ID, serviceId }),
+      getTeachers(),
+    ]);
+    const teacherMap = new Map(teachers.map(t => [t.id, t]));
     const staff = (Array.isArray(raw) ? raw : [])
       .filter(s => !s.isDeleted && s.isAvailable !== false)
-      .map(s => ({
-        teacherId: s.teacherId,
-        name: `${s.teacher?.firstName || ''} ${s.teacher?.lastName || ''}`.trim() || 'Therapist',
-        photo: s.teacher?.profileImage || null,
-        bio:   s.teacher?.bio   || null,
-      }));
+      .map(s => {
+        const t = teacherMap.get(s.teacherId);
+        return {
+          teacherId: s.teacherId,
+          name: `${s.teacher?.firstName || t?.firstName || ''} ${s.teacher?.lastName || t?.lastName || ''}`.trim() || 'Therapist',
+          photo: t?.profileImage || null,
+          bio:   t?.bio          || null,
+        };
+      });
     res.json(staff);
   } catch (err) { apiError(res, err); }
 });
