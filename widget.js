@@ -1297,27 +1297,10 @@
     const sb = buildSummaryBar();
     if (sb) document.getElementById('rbw-summary-bar').replaceWith(sb);
 
-    // Get base service staff first — only add-ons performable by the SAME therapists
-    // who can do the main service should be shown.
-    let baseStaffIds = null;
-    try {
-      const baseStaff = await authGet(`/boards/${state.board.id}/staff?serviceId=${state.service.appointmentServiceId}`);
-      baseStaffIds = new Set(baseStaff.map(m => m.teacherId));
-    } catch { /* skip intersection check if base staff fails */ }
-
-    // Filter add-ons: must have at least one therapist who can do BOTH service + addon
-    const staffChecks = allAddons.map(addon =>
-      authGet(`/boards/${state.board.id}/staff?serviceId=${addon.id}`)
-        .then(addonStaff => {
-          if (!addonStaff.length) return null;
-          // If we have base staff, require at least one overlapping therapist
-          if (baseStaffIds && !addonStaff.some(m => baseStaffIds.has(m.teacherId))) return null;
-          return addon;
-        })
-        .catch(() => null)
-    );
-    const results  = await Promise.all(staffChecks);
-    const addons   = results.filter(Boolean);
+    // Show all add-ons linked to this service — this matches native Momence widget behavior.
+    // Addon entity IDs don't map 1:1 to appointmentServiceIds so staff filtering at this
+    // step produces false negatives. Availability filtering happens at the calendar step.
+    const addons = allAddons;
 
     const grid = document.getElementById('rbw-addon-grid');
     if (!grid) return;
@@ -1616,34 +1599,24 @@
       return;
     }
 
-    // Service path: existing board-based staff logic
-    const baseServiceId   = state.service.appointmentServiceId;
-    const addonServiceIds = (state.selectedAddons || []).map(a => a.id).filter(Boolean);
-
-    const staffRequests = [
-      authGet(`/boards/${state.board.id}/staff?serviceId=${baseServiceId}`),
-      ...addonServiceIds.map(id => authGet(`/boards/${state.board.id}/staff?serviceId=${id}`))
-    ];
+    // Service path: query staff for the base service only.
+    // Addon entity IDs don't map to appointmentServiceIds so we can't use them
+    // for staff intersection — availability at the calendar step handles that naturally.
+    const baseServiceId = state.service.appointmentServiceId;
 
     try {
-      const [baseStaff, ...addonStaffs] = await Promise.all(staffRequests);
-      const validIds = addonStaffs.reduce((ids, addonStaff) => {
-        const addonIds = new Set(addonStaff.map(m => m.teacherId));
-        return ids.filter(id => addonIds.has(id));
-      }, baseStaff.map(m => m.teacherId));
-
-      const filteredStaff = baseStaff.filter(m => validIds.includes(m.teacherId));
-      state._staffCache   = filteredStaff;
-      state._validStaffIds = new Set(filteredStaff.map(m => m.teacherId));
+      const baseStaff = await authGet(`/boards/${state.board.id}/staff?serviceId=${baseServiceId}`);
+      state._staffCache    = baseStaff;
+      state._validStaffIds = new Set(baseStaff.map(m => m.teacherId));
 
       // Auto-select if only one therapist qualifies
-      if (filteredStaff.length === 1 && !state.staffId) {
-        state.staffId    = filteredStaff[0].teacherId;
-        state.staffName  = filteredStaff[0].name;
-        state.staffPhoto = filteredStaff[0].photo || null;
+      if (baseStaff.length === 1 && !state.staffId) {
+        state.staffId    = baseStaff[0].teacherId;
+        state.staffName  = baseStaff[0].name;
+        state.staffPhoto = baseStaff[0].photo || null;
       }
 
-      renderTherapistChips(filteredStaff);
+      renderTherapistChips(baseStaff);
     } catch {
       state._staffCache    = [];
       state._validStaffIds = null;
@@ -1771,38 +1744,17 @@
     }
   }
 
-  // Build the correct available-times query string for the service path,
-  // respecting add-on staff constraints when no specific therapist is selected.
-  // If add-ons narrow staff to a subset, queries each valid therapist separately
-  // and merges results (deduped by minute offset).
+  // Fetch available slots from the board-based endpoint for the service path.
+  // Respects a specific staffId if selected; otherwise returns all therapists' slots.
   async function fetchServiceAvailability(from, to) {
     const boardId   = state.board?.id;
     const serviceId = state.service?.appointmentServiceId;
     if (!boardId || !serviceId) return [];
 
-    // If a specific therapist is selected, use them directly
-    if (state.staffId) {
-      const data = await authGet(`/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}&staffId=${state.staffId}`);
-      const raw  = Array.isArray(data) ? data.flat() : [];
-      return raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
-    }
+    let qs = `/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}`;
+    if (state.staffId) qs += `&staffId=${state.staffId}`;
 
-    // If add-ons have restricted staff, query each valid therapist separately
-    const validStaff = state._validStaffIds;
-    if (validStaff && validStaff.size > 0 && state.selectedAddons.length > 0) {
-      const perStaff = await Promise.all(
-        [...validStaff].map(sid =>
-          authGet(`/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}&staffId=${sid}`)
-            .then(d => (Array.isArray(d) ? d.flat() : []))
-            .catch(() => [])
-        )
-      );
-      // Flatten and filter
-      return perStaff.flat().filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
-    }
-
-    // No restriction — return all therapists' slots
-    const data = await authGet(`/boards/${boardId}/available-times?serviceId=${serviceId}&from=${from}&to=${to}`);
+    const data = await authGet(qs);
     const raw  = Array.isArray(data) ? data.flat() : [];
     return raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
   }
