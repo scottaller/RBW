@@ -706,7 +706,10 @@ app.get('/api/boards/:boardId/available-times', async (req, res) => {
     if (!staffIds.length) return res.json([]);
 
     const perTherapist = await Promise.all(staffIds.map(async id => {
-      const raw = await readonlyGet(`/plugin/appointment-boards/${boardId}/available-times`, { hostId: HOST_ID, serviceId, from, to, staffId: id });
+      // Momence's readonly endpoint expects this scoping param named `teacherId` — passing
+      // `staffId` (which the sibling /staff endpoint uses) is silently accepted but always
+      // returns zero availability. Confirmed by direct testing against production data.
+      const raw = await readonlyGet(`/plugin/appointment-boards/${boardId}/available-times`, { hostId: HOST_ID, serviceId, from, to, teacherId: id });
       const flat = (Array.isArray(raw) ? raw : []).flat();
       const t = teacherMap.get(id);
       return flat
