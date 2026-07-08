@@ -27,7 +27,6 @@
   // Steps
   const S = {
     INTENT:         'intent',         // landing — how do you want to book?
-    CATEGORY:       'category',       // Massage or Acupuncture (legacy, kept for acupuncture path)
     DURATION:       'duration',       // length + service (one page)
     ADDONS:         'addons',         // pick add-ons
     THERAPIST_PICK: 'therapist-pick', // browse therapists with photos
@@ -41,7 +40,6 @@
 
   const PROGRESS = {
     [S.INTENT]:         5,
-    [S.CATEGORY]:       10,
     [S.DURATION]:       25,
     [S.ADDONS]:         40,
     [S.THERAPIST_PICK]: 18,
@@ -54,7 +52,6 @@
   };
 
   const BACK_TO = {
-    [S.CATEGORY]:       S.INTENT,
     [S.DURATION]:       S.INTENT,
     [S.ADDONS]:         S.DURATION,
     [S.THERAPIST_PICK]: S.INTENT,
@@ -72,7 +69,7 @@
   function freshState() {
     return {
       step:         S.INTENT,
-      path:         null,   // 'service' | 'therapist' | 'time'
+      path:         null,   // 'service' | 'therapist' | 'time' | 'rebook' | 'first-time' | 'first-acu'
       category:     null,   // 'massage' | 'acupuncture'
       duration:     null,   // 30 | 60 | 90 | 120
       board:        null,   // { id, name } selected board
@@ -99,6 +96,16 @@
       // Therapist IDs who can perform the current service + ALL selected add-ons
       // Null = not yet computed; populated by loadCalendarStaff
       _validStaffIds:  null,
+      // Intro Offers scoped picker (see renderDuration/loadServices)
+      _introOnly:      false,
+      // 'checkout' (default, post-review login) | 'rebook' (login-first, from Rebook My Last Visit)
+      _authIntent:     'checkout',
+      // True once a time+therapist have been locked in via the "first available" flow,
+      // before a service has been chosen — hides the duration grid in renderDuration()
+      _timeLocked:     false,
+      // Set of board ids the currently-selected therapist (state.staffId) can actually perform,
+      // computed by loadServices(); reset whenever staffId changes
+      _therapistCapableBoardIds: null,
     };
   }
   let state = freshState();
@@ -294,6 +301,7 @@
       font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
       padding: 2px 7px; border-radius: 20px;
     }
+    .rbw-type-badge-free { background: #2f9e5b; }
 
     /* Calendar */
     .rbw-cal { background: var(--rbw-panel); border: 1px solid var(--rbw-border); border-radius: var(--rbw-radius); overflow: hidden; margin-bottom: 20px; }
@@ -396,13 +404,25 @@
     /* Time chip picker */
     .rbw-time-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 0; }
     .rbw-time-chip {
-      padding: 9px 16px; border: 2px solid var(--rbw-border); border-radius: 22px;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 16px 6px 6px; border: 2px solid var(--rbw-border); border-radius: 22px;
       font-family: var(--rbw-font); font-size: 13px; font-weight: 600;
       cursor: pointer; background: var(--rbw-panel); color: var(--rbw-text);
-      transition: all .15s; white-space: nowrap;
+      transition: all .15s; white-space: nowrap; position: relative;
     }
     .rbw-time-chip:hover { border-color: var(--rbw-primary); color: var(--rbw-primary-dk); }
     .rbw-time-chip.on { border-color: var(--rbw-primary); background: var(--rbw-primary); color: #fff; }
+    .rbw-time-chip-avatar {
+      width: 20px; height: 20px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 9px; font-weight: 700;
+    }
+    .rbw-time-chip-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .rbw-time-chip[data-tooltip]:hover::after {
+      content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+      background: var(--rbw-purple); color: #fff; font-size: 11px; font-weight: 600; padding: 4px 8px;
+      border-radius: 6px; white-space: nowrap; margin-bottom: 6px; pointer-events: none; z-index: 10;
+    }
 
     /* Therapist avatar chips (calendar filter) */
     .rbw-tx-chips { display: flex; gap: 14px; overflow-x: auto; padding: 4px 0 10px; margin-bottom: 16px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
@@ -744,11 +764,31 @@
     if (target === S.ADDONS && state._skippedAddons) target = S.DURATION;
     // On therapist path, DURATION back goes to THERAPIST_PICK
     if (target === S.INTENT && state.step === S.DURATION && state.path === 'therapist') target = S.THERAPIST_PICK;
+    // "Find first available" paths reach CALENDAR straight from INTENT — back from there
+    // (or from a skipped-addons redirect landing on ADDONS) goes to INTENT, not ADDONS.
+    if (target === S.ADDONS && (state.path === 'first-time' || state.path === 'first-acu')) target = S.INTENT;
+    // Rebook goes INTENT -> AUTH directly, before REVIEW is ever populated
+    if (target === S.REVIEW && state.step === S.AUTH && state._authIntent === 'rebook' && !state.selectedSlot) target = S.INTENT;
     if (target) goTo(target);
   }
 
   function goTo(step) {
     state.step = step;
+    // Returning to the welcome screen always means starting a fresh flow —
+    // clear in-progress selections so a later path doesn't inherit stale state.
+    if (step === S.INTENT) {
+      state._introOnly = false;
+      state._timeLocked = false;
+      state._therapistCapableBoardIds = null;
+      state.duration = null;
+      state.board = null;
+      state.service = null;
+      state.selectedAddons = [];
+      state.selectedSlot = null;
+      state.staffId = null;
+      state.staffName = null;
+      state.staffPhoto = null;
+    }
 
     const backBtn = document.getElementById('rbw-back-btn');
     if (backBtn) backBtn.style.visibility = BACK_TO[step] ? 'visible' : 'hidden';
@@ -766,7 +806,6 @@
   function render(step) {
     switch (step) {
       case S.INTENT:         renderIntent();        break;
-      case S.CATEGORY:       renderCategory();      break;
       case S.DURATION:       renderDuration();      break;
       case S.ADDONS:         renderAddons();        break;
       case S.THERAPIST_PICK: renderTherapistPick(); break;
@@ -780,6 +819,20 @@
   }
 
   // ─── Step 0: Intent — how do you want to book? ───────────────────────────
+  // Navigate into the scoped Intro Offers picker (see renderDuration/loadServices).
+  // Shared by the first-visit banner and the purple "Intro Offers" button on renderDuration.
+  function goToIntroOffer() {
+    state.path            = 'service';
+    state.category        = 'massage';
+    state._introOnly      = true;
+    state.board           = null;
+    state.service         = null;
+    state.duration        = null;
+    state.selectedAddons  = [];
+    state._staffCache     = null;
+    goTo(S.DURATION);
+  }
+
   function renderIntent() {
     const body = document.getElementById('rbw-body');
     body.innerHTML = '';
@@ -808,29 +861,28 @@
         <button class="rbw-intent-banner-btn" id="rbw-intro-shortcut">Claim Offer →</button>
       `;
       body.appendChild(banner);
-
-      banner.querySelector('#rbw-intro-shortcut').onclick = async () => {
-        const btn = banner.querySelector('#rbw-intro-shortcut');
-        btn.disabled = true; btn.textContent = 'Loading…';
-        try {
-          if (!state._boardsCache) state._boardsCache = await authGet('/boards');
-          const introBoard = state._boardsCache.find(b => b.name.toLowerCase().includes('intro'));
-          if (introBoard && introBoard.services[0]) {
-            const svc = introBoard.services[0];
-            state.path           = 'service';
-            state.category       = 'massage';
-            state.board          = { id: introBoard.id, name: introBoard.name };
-            state.service        = svc;
-            state.duration       = svc.minDurationInMinutes;
-            state.selectedAddons = [];
-            state._staffCache    = null;
-            goTo(S.ADDONS);
-          }
-        } catch { btn.disabled = false; btn.textContent = 'Claim Offer →'; }
-      };
+      banner.querySelector('#rbw-intro-shortcut').onclick = goToIntroOffer;
     }
 
-    // Three intent cards
+    // Returning-customer shortcut — mirrors the first-visit banner above
+    const rebookCard = document.createElement('div');
+    rebookCard.className = 'rbw-intent-card full-width';
+    rebookCard.innerHTML = `
+      <div class="rbw-intent-icon">${SVG('<path d="M4 4v5h5"/><path d="M4 9a8 8 0 1 0 2-5.3"/>')}</div>
+      <div>
+        <div class="rbw-intent-label">Rebook My Last Visit</div>
+        <div class="rbw-intent-desc">Log in and we'll find the next opening for your same service, length, and therapist.</div>
+      </div>
+    `;
+    rebookCard.onclick = () => {
+      state.path        = 'rebook';
+      state._authIntent = 'rebook';
+      state.authMode     = 'login';
+      goTo(S.AUTH);
+    };
+    body.appendChild(rebookCard);
+
+    // Core booking paths
     const grid = document.createElement('div');
     grid.className = 'rbw-intent-grid';
 
@@ -840,16 +892,25 @@
         icon: SVG('<path d="M2 6Q6 3 10 6Q14 9 18 6"/><path d="M2 11Q6 8 10 11Q14 14 18 11"/><path d="M2 16Q6 13 10 16Q14 19 18 16"/>'),
         label: 'By Service',
         desc: 'Browse massages, specialty treatments, and intro offers.',
+        onClick: () => { state.path = 'service'; state.category = 'massage'; goTo(S.DURATION); },
       },
       {
         key: 'therapist',
         icon: SVG('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
         label: 'By Therapist',
         desc: 'Pick your favorite therapist, then find a time that works.',
+        onClick: () => { state.path = 'therapist'; state.category = 'massage'; goTo(S.THERAPIST_PICK); },
+      },
+      {
+        key: 'acupuncture',
+        icon: SVG('<line x1="7" y1="3" x2="7" y2="17"/><line x1="10" y1="2" x2="10" y2="16"/><line x1="13" y1="3" x2="13" y2="17"/><circle cx="7" cy="3" r="1" fill="currentColor" stroke="none"/><circle cx="10" cy="2" r="1" fill="currentColor" stroke="none"/><circle cx="13" cy="3" r="1" fill="currentColor" stroke="none"/>'),
+        label: 'Acupuncture',
+        desc: 'Browse acupuncture services and book directly.',
+        onClick: () => { state.path = 'service'; state.category = 'acupuncture'; goTo(S.DURATION); },
       },
     ];
 
-    paths.forEach(({ key, icon, label, desc }) => {
+    paths.forEach(({ icon, label, desc, onClick }) => {
       const card = document.createElement('div');
       card.className = 'rbw-intent-card';
       card.innerHTML = `
@@ -857,118 +918,78 @@
         <div class="rbw-intent-label">${label}</div>
         <div class="rbw-intent-desc">${desc}</div>
       `;
-      card.onclick = () => {
-        state.path     = key;
-        state.category = 'massage';
-        if (key === 'therapist') {
-          goTo(S.THERAPIST_PICK);
-        } else {
-          goTo(S.DURATION);
-        }
-      };
+      card.onclick = onClick;
       grid.appendChild(card);
     });
 
-    // "By Time" as full-width third card
-    const timeCard = document.createElement('div');
-    timeCard.className = 'rbw-intent-card full-width';
-    timeCard.innerHTML = `
-      <div class="rbw-intent-icon">${SVG('<circle cx="10" cy="10" r="8"/><polyline points="10 5 10 10 14 12"/>')}</div>
-      <div>
-        <div class="rbw-intent-label">By Available Time</div>
-        <div class="rbw-intent-desc">See all open slots across all therapists — we'll highlight the best ones.</div>
-      </div>
-    `;
-    timeCard.onclick = () => {
-      state.path     = 'time';
-      state.category = 'massage';
-      goTo(S.DURATION);
-    };
-    grid.appendChild(timeCard);
-
     body.appendChild(grid);
 
-    // Acupuncture link
-    const acuWrap = document.createElement('div');
-    acuWrap.className = 'rbw-intent-acu';
-    const acuLink = document.createElement('button');
-    acuLink.className = 'rbw-intent-acu-link';
-    acuLink.textContent = 'Booking acupuncture? Click here →';
-    acuLink.onclick = () => {
-      state.path     = 'service';
-      state.category = 'acupuncture';
-      goTo(S.DURATION);
-    };
-    acuWrap.appendChild(acuLink);
-    body.appendChild(acuWrap);
-  }
+    // "Find first available" — massage and acupuncture, full-width cards
+    const firstAvailCards = [
+      {
+        key: 'first-time',
+        icon: SVG('<circle cx="10" cy="10" r="8"/><polyline points="10 5 10 10 14 12"/>'),
+        label: 'Find First Available Massage Availability',
+        desc: "See the soonest open times across all therapists — pick a time, then choose your massage type.",
+        category: 'massage',
+      },
+      {
+        key: 'first-acu',
+        icon: SVG('<circle cx="10" cy="10" r="8"/><polyline points="10 5 10 10 14 12"/>'),
+        label: 'Find First Available Acupuncture Availability',
+        desc: 'See the soonest open acupuncture times — pick a time, then choose your appointment type.',
+        category: 'acupuncture',
+      },
+    ];
 
-  // ─── Step 0b: Category (legacy, kept for direct acupuncture path) ─────────
-  function renderCategory() {
-    const body = document.getElementById('rbw-body');
-    body.innerHTML = '';
-
-    const title = document.createElement('h2');
-    title.className = 'rbw-title';
-    title.textContent = 'Welcome to Revive Bodywork';
-    body.appendChild(title);
-
-    const sub = document.createElement('p');
-    sub.className = 'rbw-subtitle';
-    sub.textContent = 'What type of session are you booking?';
-    body.appendChild(sub);
-
-    const grid = document.createElement('div');
-    grid.className = 'rbw-cat-grid';
-
-    [
-      { key: 'massage',      emoji: '🫴', label: 'Massage',      desc: 'Relaxation, deep tissue & more' },
-      { key: 'acupuncture',  emoji: '🌿', label: 'Acupuncture',  desc: 'Traditional needle therapy' },
-    ].forEach(({ key, emoji, label, desc }) => {
+    firstAvailCards.forEach(({ key, icon, label, desc, category }) => {
       const card = document.createElement('div');
-      card.className = 'rbw-cat-card' + (state.category === key ? ' on' : '');
+      card.className = 'rbw-intent-card full-width';
       card.innerHTML = `
-        <div class="rbw-cat-icon">${emoji}</div>
-        <div class="rbw-cat-label">${label}</div>
-        <div class="rbw-cat-desc">${desc}</div>
+        <div class="rbw-intent-icon">${icon}</div>
+        <div>
+          <div class="rbw-intent-label">${label}</div>
+          <div class="rbw-intent-desc">${desc}</div>
+        </div>
       `;
       card.onclick = () => {
-        if (state.category !== key) {
-          state.category = key;
-          state.duration = null;
-          state.board = null;
-          state.service = null;
-          state.selectedAddons = [];
-          state._staffCache = null;
-        }
-        goTo(S.DURATION);
+        state.path     = key;
+        state.category = category;
+        goTo(S.CALENDAR);
       };
-      grid.appendChild(card);
+      body.appendChild(card);
     });
-
-    body.appendChild(grid);
   }
 
   // ─── Step 1: Duration + Service (combined) ────────────────────────────────
   function renderDuration() {
     const body = document.getElementById('rbw-body');
     const isAcu = state.category === 'acupuncture';
+    const hideDurationGrid = isAcu || state._introOnly || state._timeLocked;
     body.innerHTML = '';
 
     const title = document.createElement('h2');
     title.className = 'rbw-title';
-    title.textContent = isAcu ? 'Choose your service' : 'Book your session';
-    body.appendChild(title);
-
     const sub = document.createElement('p');
     sub.className = 'rbw-subtitle';
-    sub.textContent = isAcu
-      ? 'Select an acupuncture appointment'
-      : 'Choose a length, then pick your service';
+    if (state._introOnly) {
+      title.textContent = 'Choose your intro offer';
+      sub.textContent = 'Two new-client specials — pick one to continue';
+    } else if (state._timeLocked) {
+      title.textContent = isAcu ? 'What type of appointment?' : 'What type of massage?';
+      sub.textContent = "You're set for " + (state.selectedSlot?.time || 'your time') + ' — just choose your service';
+    } else {
+      title.textContent = isAcu ? 'Choose your service' : 'Book your session';
+      sub.textContent = isAcu
+        ? 'Select an acupuncture appointment'
+        : 'Choose a length, then pick your service';
+    }
+    body.appendChild(title);
     body.appendChild(sub);
 
-    // Therapist context bar — shown when coming from the "By Therapist" path
-    if (state.path === 'therapist' && state.staffName) {
+    // Therapist context bar — shown when a specific therapist was already picked
+    // (either via "By Therapist" or a locked "first available" slot)
+    if ((state.path === 'therapist' || state._timeLocked) && state.staffName) {
       const bar = document.createElement('div');
       bar.style.cssText = 'display:flex;align-items:center;gap:10px;background:var(--rbw-purple-lt);border:1px solid rgba(65,47,131,.15);border-radius:10px;padding:10px 14px;margin-bottom:18px;';
       const av = buildAvatar(state.staffName, state.staffPhoto, 'rbw-tx-chip-avatar');
@@ -984,7 +1005,7 @@
       body.appendChild(bar);
     }
 
-    if (!isAcu) {
+    if (!hideDurationGrid) {
       // Featured Intro Offers shortcut — bypasses duration picker
       const introBtn = document.createElement('button');
       introBtn.className = 'rbw-intro-btn';
@@ -995,23 +1016,7 @@
         </div>
         <div class="rbw-intro-btn-arrow">→</div>
       `;
-      introBtn.onclick = async () => {
-        introBtn.disabled = true;
-        introBtn.style.opacity = '0.7';
-        try {
-          if (!state._boardsCache) state._boardsCache = await authGet('/boards');
-          const introBoard = state._boardsCache.find(b => b.name.toLowerCase().includes('intro'));
-          if (introBoard && introBoard.services[0]) {
-            const svc = introBoard.services[0];
-            state.board          = { id: introBoard.id, name: introBoard.name };
-            state.service        = svc;
-            state.duration       = svc.minDurationInMinutes;
-            state.selectedAddons = [];
-            state._staffCache    = null;
-            goTo(S.ADDONS);
-          }
-        } catch { introBtn.disabled = false; introBtn.style.opacity = '1'; }
-      };
+      introBtn.onclick = goToIntroOffer;
       body.appendChild(introBtn);
 
       const durLbl = document.createElement('div');
@@ -1062,7 +1067,7 @@
     svcSection.id = 'rbw-svc-section';
     body.appendChild(svcSection);
 
-    if (state.duration || isAcu) loadServices();
+    if (state.duration || isAcu || state._introOnly) loadServices();
   }
 
   // Keyword → SVG icon mapping for service tiles (stroke-based, currentColor = brand purple)
@@ -1133,10 +1138,11 @@
     if (!section) return;
 
     const isAcu = state.category === 'acupuncture';
+    const introOnly = state._introOnly;
 
     const lbl = document.createElement('div');
     lbl.className = 'rbw-lbl';
-    lbl.textContent = isAcu ? 'Available Services' : 'Service Type';
+    lbl.textContent = introOnly ? 'Intro Offers' : (isAcu ? 'Available Services' : 'Service Type');
 
     const grid = document.createElement('div');
     grid.className = 'rbw-type-grid';
@@ -1151,23 +1157,74 @@
         state._boardsCache = await authGet('/boards');
       }
 
-      // Split boards into standard (match selected duration) and specialty (fixed durations)
+      const introBoard = state._boardsCache.find(b => b.name.toLowerCase().includes('intro'));
+
+      // Split boards into standard (match selected duration) and specialty (fixed durations).
+      // `useServiceName` marks tiles from a board that holds several differently-named
+      // services (Intro Offers, Acupuncture) — those tiles are titled from the service, not the board.
       const STANDARD_DURATIONS = new Set([30, 60, 90, 120]);
       const standardBoards = [], specialtyBoards = [];
 
-      state._boardsCache.forEach(board => {
-        const isAcuBoard = board.name.toLowerCase().includes('acupuncture');
-        if (isAcu !== isAcuBoard) return;
-        if (isAcu) { standardBoards.push({ board, svc: board.services[0] }); return; }
-        const svc = board.services.find(s => s.minDurationInMinutes === state.duration);
-        if (svc) { standardBoards.push({ board, svc }); return; }
-        // Specialty: has no service for the selected duration — show with its own pricing
-        const anySvc = board.services.find(s => !STANDARD_DURATIONS.has(s.minDurationInMinutes));
-        if (anySvc) specialtyBoards.push({ board, svc: anySvc, isSpecialty: true });
-      });
+      if (introOnly) {
+        // Scoped Intro Offers picker — only the two genuinely-discounted items.
+        // (The board also holds several full-price services duplicated from other boards —
+        // never take services[0] blindly, that was the original bug.)
+        if (introBoard) {
+          introBoard.services
+            .filter(s => /^intro offer/i.test(s.name))
+            .forEach(svc => standardBoards.push({ board: introBoard, svc, isSpecialty: true, useServiceName: true }));
+        }
+      } else if (isAcu) {
+        state._boardsCache.forEach(board => {
+          if (!board.name.toLowerCase().includes('acupuncture')) return;
+          board.services.forEach(svc => standardBoards.push({
+            board, svc, isSpecialty: true, useServiceName: true, isFree: svc.priceInCurrency === 0,
+          }));
+        });
+      } else {
+        state._boardsCache.forEach(board => {
+          if (board.id === introBoard?.id) return; // Intro Offers has its own dedicated entry point
+          const isAcuBoard = board.name.toLowerCase().includes('acupuncture');
+          if (isAcuBoard) {
+            // "By Therapist" (and a locked "first available" slot) can land on an
+            // acupuncture-only specialist — always offer their real acupuncture services
+            // regardless of the massage duration picked above, so they don't hit a dead
+            // end. Every other entry point sets category explicitly and never reaches here.
+            if (state.staffId) {
+              board.services.forEach(svc => standardBoards.push({
+                board, svc, isSpecialty: true, useServiceName: true, isFree: svc.priceInCurrency === 0,
+              }));
+            }
+            return;
+          }
+          const svc = board.services.find(s => s.minDurationInMinutes === state.duration);
+          if (svc) { standardBoards.push({ board, svc }); return; }
+          // Specialty: has no service for the selected duration — show with its own pricing
+          const anySvc = board.services.find(s => !STANDARD_DURATIONS.has(s.minDurationInMinutes));
+          if (anySvc) specialtyBoards.push({ board, svc: anySvc, isSpecialty: true });
+        });
+      }
 
-      const makeServiceTile = ({ board, svc, isSpecialty }, idx, isPopularEligible) => {
-        const isOn = state.board?.id === board.id;
+      // A specific therapist is already locked in (Book-by-Therapist, or a locked
+      // "first available" slot) — scope the grid to only what they actually perform.
+      if (state.staffId && !introOnly) {
+        if (state._therapistCapableBoardIds === null) {
+          const candidates = [...standardBoards, ...specialtyBoards];
+          const checks = await Promise.all(candidates.map(async ({ board, svc }) => {
+            try {
+              const staff = await authGet(`/boards/${board.id}/staff?serviceId=${svc.appointmentServiceId}`);
+              return staff.some(s => s.teacherId === state.staffId) ? board.id : null;
+            } catch { return null; }
+          }));
+          state._therapistCapableBoardIds = new Set(checks.filter(Boolean));
+        }
+        const capable = id => state._therapistCapableBoardIds.has(id);
+        for (let i = standardBoards.length - 1; i >= 0; i--) if (!capable(standardBoards[i].board.id)) standardBoards.splice(i, 1);
+        for (let i = specialtyBoards.length - 1; i >= 0; i--) if (!capable(specialtyBoards[i].board.id)) specialtyBoards.splice(i, 1);
+      }
+
+      const makeServiceTile = ({ board, svc, isSpecialty, useServiceName, isFree }, idx, isPopularEligible) => {
+        const isOn = state.board?.id === board.id && state.service?.appointmentServiceId === svc.appointmentServiceId;
         const card = document.createElement('div');
         card.className = 'rbw-type-card' + (isOn ? ' on' : '');
         const nameLow = board.name.toLowerCase();
@@ -1175,11 +1232,13 @@
           || SVG('<circle cx="10" cy="10" r="7"/><path d="M7 10h6M10 7v6"/>');
         const fallbackDesc = SERVICE_DESCS.find(r => r.keys.some(k => nameLow.includes(k)))?.desc || '';
         const desc = stripHtml(svc.description || '') || fallbackDesc;
-        const isPopular = isPopularEligible && idx === 0;
+        const isPopular = isPopularEligible && idx === 0 && !introOnly && !isAcu;
+        const title = useServiceName ? svc.name.trim() : board.name;
         card.innerHTML = `
           ${isPopular ? '<div class="rbw-type-badge">Popular</div>' : ''}
+          ${isFree ? '<div class="rbw-type-badge rbw-type-badge-free">Free Consultation</div>' : ''}
           <div class="rbw-type-icon">${icon}</div>
-          <div class="rbw-type-name">${board.name}</div>
+          <div class="rbw-type-name">${title}</div>
           ${desc ? `<div class="rbw-type-desc">${desc}</div>` : ''}
           ${isSpecialty ? `<div class="rbw-type-meta">${svc.minDurationInMinutes} min · <strong>${fmt(svc.priceInCurrency)}</strong></div>` : ''}
         `;
@@ -1450,6 +1509,8 @@
       state.staffId   = null;
       state.staffName = null;
       state.staffPhoto = null;
+      state._staffCache = null;
+      state._therapistCapableBoardIds = null;
       goTo(S.DURATION);
     };
     anyWrap.appendChild(anyCard);
@@ -1498,6 +1559,7 @@
           state.staffName  = fullName;
           state.staffPhoto = t.photo || null;
           state._staffCache = null;
+          state._therapistCapableBoardIds = null;
           goTo(S.DURATION);
         };
         grid.appendChild(card);
@@ -1520,7 +1582,8 @@
     // Title + summary
     const title = document.createElement('h2');
     title.className = 'rbw-title';
-    title.textContent = state.path === 'time' ? 'Find a time' : 'Choose your time';
+    const isFirstAvailFlow = state.path === 'first-time' || state.path === 'first-acu';
+    title.textContent = (state.path === 'time' || isFirstAvailFlow) ? 'Find a time' : 'Choose your time';
     body.appendChild(title);
 
     const sb = buildSummaryBar();
@@ -1564,7 +1627,7 @@
     cta.id = 'rbw-cal-cta';
     cta.disabled = true;
     cta.textContent = 'Continue';
-    cta.onclick = () => goTo(S.REVIEW);
+    cta.onclick = () => calendarContinue();
     footer.appendChild(cta);
     body.appendChild(footer);
 
@@ -1572,10 +1635,22 @@
     loadCalendarStaff();
   }
 
+  // "Find first available" paths lock in a time+therapist before a service is chosen —
+  // continuing from the calendar sends them to pick a service type instead of straight to Review.
+  function calendarContinue() {
+    if (state.path === 'first-time' || state.path === 'first-acu') {
+      state._timeLocked = true;
+      goTo(S.DURATION);
+    } else {
+      goTo(S.REVIEW);
+    }
+  }
+
   async function loadCalendarStaff() {
-    // On time/therapist paths, we use /api/availability (cross-therapist).
-    // We still need therapist chips — load from /api/teachers if we have the cache.
-    const useSmartCalendar = state.path === 'time' || state.path === 'therapist';
+    // "Time" and "first available" paths use /api/availability (cross-therapist, no board/service
+    // chosen yet). "By Therapist" and the regular service path both already have a board/service by
+    // now, so they go through the board-scoped branch below (pre-seeded with staffId if one was picked).
+    const useSmartCalendar = state.path === 'time' || state.path === 'first-time' || state.path === 'first-acu';
 
     if (useSmartCalendar) {
       try {
@@ -1585,12 +1660,8 @@
           name: `${t.firstName} ${t.lastName}`.trim() || 'Therapist',
           photo: t.photo || null,
         }));
-        // Pre-filter to just the selected therapist if on therapist path
-        const filtered = state.path === 'therapist' && state.staffId
-          ? staff.filter(m => m.teacherId === state.staffId)
-          : staff;
-        state._staffCache = filtered;
-        renderTherapistChips(filtered);
+        state._staffCache = staff;
+        renderTherapistChips(staff);
       } catch {
         state._staffCache = [];
         renderTherapistChips([]);
@@ -1657,6 +1728,7 @@
         state.staffName    = id ? name : null;
         state.staffPhoto   = id ? photo : null;
         state.selectedSlot = null;
+        state._therapistCapableBoardIds = null;
         row.querySelectorAll('.rbw-tx-chip').forEach(c => c.classList.remove('on'));
         chip.classList.add('on');
         findFirstAvailable();
@@ -1669,12 +1741,27 @@
     staff.forEach(m => row.appendChild(makeChip(m.teacherId, m.name, m.photo)));
   }
 
+  // Distinct real service durations for a category, used by the "find first available" multi-duration
+  // scan — massage uses the 4 standard lengths; acupuncture's services don't follow standard lengths,
+  // so pull its boards' actual minDurationInMinutes values from the boards cache.
+  async function getScanDurations(category) {
+    if (category !== 'acupuncture') return [30, 60, 90, 120];
+    if (!state._boardsCache) state._boardsCache = await authGet('/boards');
+    const durations = new Set();
+    state._boardsCache.forEach(board => {
+      if (!board.name.toLowerCase().includes('acupuncture')) return;
+      board.services.forEach(s => durations.add(s.minDurationInMinutes));
+    });
+    return durations.size ? [...durations] : [60];
+  }
+
   // Scans forward up to 14 days, updates the purple first-avail card and jumps the calendar.
   async function findFirstAvailable() {
     const faMount = document.getElementById('rbw-first-avail-mount');
     if (faMount) faMount.innerHTML = `<div class="rbw-spin-wrap" style="color:#fff"><div class="rbw-spinner" style="border-color:rgba(255,255,255,.25);border-top-color:#fff"></div><span>Finding first available…</span></div>`;
 
-    const useSmartCalendar = state.path === 'time' || state.path === 'therapist';
+    const isFirstAvailFlow = state.path === 'first-time' || state.path === 'first-acu';
+    const useSmartCalendar = state.path === 'time' || isFirstAvailFlow;
     const p2   = n => String(n).padStart(2, '0');
     const fmtD = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 
@@ -1685,24 +1772,49 @@
       let firstSlot     = null;
 
       if (useSmartCalendar) {
-        // Smart path: scan day-by-day hitting /api/availability until we find a slot
-        const dur = state.duration || 60;
-        for (let i = 0; i < 14; i++) {
-          const d = new Date(start); d.setDate(d.getDate() + i);
-          const dateStr = fmtD(d);
-          let qs = `/availability?date=${dateStr}&duration=${dur}`;
-          if (state.staffId) qs += `&therapistId=${state.staffId}`;
-          const data = await authGet(qs);
-          const slots = data.slots || [];
-          if (slots.length) {
-            firstSlotDate = d;
-            firstSlot = slots[0]; // already sorted by score desc
-            break;
+        if (isFirstAvailFlow) {
+          // "Find first available" — duration isn't chosen yet, so check every real duration
+          // for this category before committing to a day, and lock in whichever duration wins.
+          const durations = await getScanDurations(state.category);
+          let bestDuration = null;
+          for (let i = 0; i < 14 && !firstSlot; i++) {
+            const d = new Date(start); d.setDate(d.getDate() + i);
+            const dateStr = fmtD(d);
+            let bestForDay = null, bestForDayDuration = null;
+            for (const dur of durations) {
+              let qs = `/availability?date=${dateStr}&duration=${dur}`;
+              if (state.staffId) qs += `&therapistId=${state.staffId}`;
+              const data = await authGet(qs);
+              const top = (data.slots || [])[0];
+              if (top && (!bestForDay || top.score > bestForDay.score)) { bestForDay = top; bestForDayDuration = dur; }
+            }
+            if (bestForDay) { firstSlotDate = d; firstSlot = bestForDay; bestDuration = bestForDayDuration; }
           }
-        }
-        if (!firstSlot) {
-          if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
-          updateCalCta(); return;
+          if (!firstSlot) {
+            if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
+            updateCalCta(); return;
+          }
+          state.duration = bestDuration;
+        } else {
+          // Smart path: scan day-by-day hitting /api/availability until we find a slot
+          const dur = state.duration || 60;
+          for (let i = 0; i < 14; i++) {
+            const d = new Date(start); d.setDate(d.getDate() + i);
+            const dateStr = fmtD(d);
+            let qs = `/availability?date=${dateStr}&duration=${dur}`;
+            if (state.staffId) qs += `&therapistId=${state.staffId}`;
+            const data = await authGet(qs);
+            const slots = data.slots || [];
+            if (slots.length) {
+              firstSlotDate = d;
+              firstSlot = slots[0]; // already sorted by score desc
+              break;
+            }
+          }
+          if (!firstSlot) {
+            if (faMount) faMount.innerHTML = `<p style="margin:0;font-size:14px;opacity:.85;">No availability in the next two weeks. Please check back soon.</p>`;
+            updateCalCta(); return;
+          }
         }
         state.selectedDate = firstSlotDate;
         rebuildCalendarSelection();
@@ -1745,7 +1857,8 @@
   }
 
   // Fetch available slots from the board-based endpoint for the service path.
-  // Respects a specific staffId if selected; otherwise returns all therapists' slots.
+  // Respects a specific staffId if selected; otherwise returns all qualifying therapists'
+  // slots, each already stamped with real teacherId/therapistName/therapistPhoto server-side.
   async function fetchServiceAvailability(from, to) {
     const boardId   = state.board?.id;
     const serviceId = state.service?.appointmentServiceId;
@@ -1755,8 +1868,7 @@
     if (state.staffId) qs += `&staffId=${state.staffId}`;
 
     const data = await authGet(qs);
-    const raw  = Array.isArray(data) ? data.flat() : [];
-    return raw.filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false);
+    return Array.isArray(data) ? data : [];
   }
 
   // Convert a slot from /api/availability format to a local slot object
@@ -1782,9 +1894,10 @@
   function toLocalSlot(s) {
     const d    = new Date(s.value);
     const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-    const cached = (state._staffCache || []).find(m => m.teacherId === s.teacherId);
-    const therapistName = cached?.name || (state.staffId === s.teacherId ? state.staffName : null);
-    return { isoValue: s.value, time, minuteOffset: d.getHours() * 60 + d.getMinutes(), teacherId: s.teacherId, therapistName };
+    return {
+      isoValue: s.value, time, minuteOffset: d.getHours() * 60 + d.getMinutes(),
+      teacherId: s.teacherId, therapistName: s.therapistName, therapistPhoto: s.therapistPhoto,
+    };
   }
 
   async function loadAvailability(date) {
@@ -1797,7 +1910,7 @@
     const dateStr = `${date.getFullYear()}-${p2(date.getMonth() + 1)}-${p2(date.getDate())}`;
 
     try {
-      if (state.path === 'time' || state.path === 'therapist') {
+      if (state.path === 'time' || state.path === 'first-time' || state.path === 'first-acu') {
         // Smart calendar: /api/availability returns gap-scored slots with therapist info
         const dur = state.duration || 60;
         let qs = `/availability?date=${dateStr}&duration=${dur}`;
@@ -1958,7 +2071,7 @@
       if (slot.teacherId)    state.staffId    = slot.teacherId;
       if (slot.therapistName) state.staffName = slot.therapistName;
       if (slot.therapistPhoto) state.staffPhoto = slot.therapistPhoto;
-      goTo(S.REVIEW);
+      calendarContinue();
     };
     return wrap;
   }
@@ -1993,7 +2106,19 @@
     uniqueSlots.forEach(slot => {
       const chip = document.createElement('button');
       chip.className = 'rbw-time-chip' + (state.selectedSlot?.minuteOffset === slot.minuteOffset ? ' on' : '');
-      chip.textContent = slot.time;
+      if (slot.therapistName) {
+        chip.title = slot.therapistName;
+        chip.dataset.tooltip = 'with ' + slot.therapistName;
+        const av = buildAvatar(slot.therapistName, slot.therapistPhoto, 'rbw-time-chip-avatar');
+        if (!slot.therapistPhoto) {
+          av.style.background = avatarColor(slot.teacherId || 0);
+          av.style.color = '#fff';
+        }
+        chip.appendChild(av);
+      }
+      const timeSpan = document.createElement('span');
+      timeSpan.textContent = slot.time;
+      chip.appendChild(timeSpan);
       chip.onclick = () => {
         state.selectedSlot = slot;
         chipsWrap.querySelectorAll('.rbw-time-chip').forEach(c => c.classList.remove('on'));
@@ -2092,9 +2217,10 @@
     const mode = state.authMode;
     const body = document.getElementById('rbw-body');
 
+    const rebooking = state._authIntent === 'rebook';
     body.innerHTML = `
       <h2 class="rbw-title">${mode === 'login' ? 'Welcome back' : 'Create your account'}</h2>
-      <p class="rbw-subtitle">${mode === 'login' ? 'Sign in to complete your booking' : 'Quick and free — no birthday required'}</p>
+      <p class="rbw-subtitle">${mode === 'login' ? (rebooking ? "Sign in and we'll find your next opening" : 'Sign in to complete your booking') : 'Quick and free — no birthday required'}</p>
       <div class="rbw-tabs">
         <button class="rbw-tab ${mode === 'login' ? 'on' : ''}" id="rbw-tab-login">Sign In</button>
         <button class="rbw-tab ${mode === 'register' ? 'on' : ''}" id="rbw-tab-reg">Create Account</button>
@@ -2150,6 +2276,8 @@
   // After a successful login or register, pre-fetch member data in parallel
   // so the checkout step can render immediately without a second loading screen.
   async function onAuthSuccess() {
+    if (state._authIntent === 'rebook') return onRebookAuthSuccess();
+
     const [pmRes, mbRes, profileRes] = await Promise.allSettled([
       authGet('/payment-methods'),
       authGet('/memberships/active'),
@@ -2174,6 +2302,65 @@
     }
 
     goTo(S.CHECKOUT);
+  }
+
+  // After login via the "Rebook My Last Visit" path: look up the member's most recent
+  // past appointment and jump straight to the calendar, pre-scoped to that exact
+  // service + therapist, so findFirstAvailable() finds the next matching opening.
+  async function onRebookAuthSuccess() {
+    const body = document.getElementById('rbw-body');
+    body.innerHTML = `<div class="rbw-spin-wrap" style="padding:60px 0;"><div class="rbw-spinner"></div><span>Finding your last visit…</span></div>`;
+
+    const showNotFound = (message) => {
+      body.innerHTML = `
+        <h2 class="rbw-title">No luck</h2>
+        <p class="rbw-subtitle">${message}</p>
+        <button class="rbw-btn rbw-btn-primary" id="rbw-rebook-back">Browse Services</button>
+      `;
+      document.getElementById('rbw-rebook-back').onclick = () => goTo(S.INTENT);
+    };
+
+    try {
+      const { appointment } = await authGet('/member/last-appointment');
+      if (!appointment) {
+        showNotFound("We couldn't find a previous visit on your account yet.");
+        return;
+      }
+
+      if (!state._boardsCache) state._boardsCache = await authGet('/boards');
+      const board = state._boardsCache.find(b => b.id === appointment.board?.id);
+      const svc   = board?.services.find(s => s.appointmentServiceId === appointment.service?.id);
+      if (!board || !svc) {
+        showNotFound("Your last service isn't available for online booking anymore — let's find something new.");
+        return;
+      }
+
+      state.path            = 'service';
+      state.category        = board.name.toLowerCase().includes('acupuncture') ? 'acupuncture' : 'massage';
+      state.board            = { id: board.id, name: board.name };
+      state.service           = svc;
+      state.duration          = appointment.durationInMinutes || svc.minDurationInMinutes;
+      state.selectedAddons    = [];
+      state._staffCache       = null;
+      state._skippedAddons    = false;
+
+      // Rehydrate the therapist, but only if they still actually perform this service today
+      if (appointment.teacher?.id) {
+        try {
+          const staff = await authGet(`/boards/${board.id}/staff?serviceId=${svc.appointmentServiceId}`);
+          const match = staff.find(s => s.teacherId === appointment.teacher.id);
+          if (match) {
+            state.staffId    = match.teacherId;
+            state.staffName  = match.name;
+            state.staffPhoto = match.photo || null;
+          }
+        } catch { /* staff lookup failed — fall back to "any available" */ }
+      }
+
+      goTo(S.CALENDAR);
+    } catch {
+      showNotFound("Something went wrong looking up your last visit — let's find something new.");
+    }
   }
 
   // ─── Step 5: Review ──────────────────────────────────────────────────────

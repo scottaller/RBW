@@ -474,6 +474,27 @@ app.get('/api/member/profile', async (req, res) => {
   } catch (err) { apiError(res, err); }
 });
 
+// ─── Rebook: most recent past appointment for the logged-in member ────────
+// Momence has no member-scoped "my appointment history" endpoint — only a host-scoped
+// one filterable by memberId, so we resolve memberId from the member's own profile first,
+// then use the host token to look it up (mirrors the existing gap-scoring reservations call).
+app.get('/api/member/last-appointment', async (req, res) => {
+  const token = memberToken(req);
+  if (!token) return res.status(401).json({ message: 'Authentication required.' });
+  try {
+    const profile = await v2Get('/api/v2/auth/profile', token);
+    const hostToken = await getHostToken();
+    if (!hostToken) return res.status(503).json({ message: 'Host auth not configured.' });
+    const nowIso = new Date().toISOString();
+    const data = await v2Get(
+      `/api/v2/host/members/${profile.memberId}/appointments?page=0&pageSize=1&sortBy=startsAt&sortOrder=DESC&startBefore=${nowIso}&includeCancelled=false`,
+      hostToken
+    );
+    const appointment = (Array.isArray(data.payload) ? data.payload : [])[0] || null;
+    res.json({ appointment });
+  } catch (err) { apiError(res, err); }
+});
+
 // ─── Saved payment methods ─────────────────────────────────────────────────
 // GET  → list member's saved cards
 // POST → returns Momence-hosted add-card URL ({ url }) for popup flow
@@ -656,15 +677,49 @@ app.get('/api/boards/:boardId/staff', async (req, res) => {
 });
 
 // GET /api/boards/:boardId/available-times?serviceId=X&from=YYYY-MM-DD&to=YYYY-MM-DD&staffId=optional
+//
+// The underlying Momence readonly endpoint never reports which therapist a given open
+// slot belongs to — it only returns isTaken/isCutOff flags, with no teacherId at all,
+// unless the query is already scoped to one staffId. So when no staffId is given and more
+// than one therapist can perform this service, we query once per qualifying therapist and
+// merge the results, stamping each slot with that therapist's real id/name/photo — every
+// slot returned is unambiguously tied to a specific teacher, matching what /api/availability
+// already does for the smart-calendar paths. Also pre-filters to genuinely open slots.
 app.get('/api/boards/:boardId/available-times', async (req, res) => {
   const { boardId } = req.params;
   const { serviceId, from, to, staffId } = req.query;
   if (!serviceId || !from || !to) return res.status(400).json({ message: 'serviceId, from, to are required' });
-  const params = { hostId: HOST_ID, serviceId, from, to };
-  if (staffId) params.staffId = staffId;
+
   try {
-    const data = await readonlyGet(`/plugin/appointment-boards/${boardId}/available-times`, params);
-    res.json(data);
+    const teachers = await getTeachers();
+    const teacherMap = new Map(teachers.map(t => [t.id, t]));
+
+    let staffIds;
+    if (staffId) {
+      staffIds = [Number(staffId)];
+    } else {
+      const rawStaff = await readonlyGet(`/plugin/appointment-boards/${boardId}/staff`, { hostId: HOST_ID, serviceId });
+      staffIds = (Array.isArray(rawStaff) ? rawStaff : [])
+        .filter(s => !s.isDeleted && s.isAvailable !== false)
+        .map(s => s.teacherId);
+    }
+    if (!staffIds.length) return res.json([]);
+
+    const perTherapist = await Promise.all(staffIds.map(async id => {
+      const raw = await readonlyGet(`/plugin/appointment-boards/${boardId}/available-times`, { hostId: HOST_ID, serviceId, from, to, staffId: id });
+      const flat = (Array.isArray(raw) ? raw : []).flat();
+      const t = teacherMap.get(id);
+      return flat
+        .filter(s => !s.isTaken && !s.isCutOff && s.isAvailableForSelectedStaffIds !== false)
+        .map(s => ({
+          value:          s.value,
+          teacherId:      id,
+          therapistName:  t ? `${t.firstName} ${t.lastName}`.trim() : null,
+          therapistPhoto: t?.profileImage || null,
+        }));
+    }));
+
+    res.json(perTherapist.flat());
   } catch (err) { apiError(res, err); }
 });
 
